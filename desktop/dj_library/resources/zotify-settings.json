@@ -1,0 +1,611 @@
+{
+  "ROOT_PATH": {
+    "default": "~/Music/Zotify Music",
+    "type": "str",
+    "flags": [
+      "-rp",
+      "--root-path"
+    ]
+  },
+  "ROOT_PODCAST_PATH": {
+    "default": "~/Music/Zotify Podcasts",
+    "type": "str",
+    "flags": [
+      "-rpp",
+      "--root-podcast-path"
+    ]
+  },
+  "SAVE_CREDENTIALS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--save-credentials"
+    ]
+  },
+  "CREDENTIALS_LOCATION": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--creds",
+      "--credentials-location"
+    ]
+  },
+  "OUTPUT": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--output"
+    ]
+  },
+  "OUTPUT_SINGLE": {
+    "default": "{artist}/{album}/{artist}_{song_name}",
+    "type": "str",
+    "flags": [
+      "-os",
+      "--output-single"
+    ]
+  },
+  "OUTPUT_ALBUM": {
+    "default": "{artist}/{album}/{album_num}_{artist}_{song_name}",
+    "type": "str",
+    "flags": [
+      "-oa",
+      "--output-album"
+    ]
+  },
+  "OUTPUT_PLAYLIST_EXT": {
+    "default": "{playlist}/{playlist_num}_{artist}_{song_name}",
+    "type": "str",
+    "flags": [
+      "-oe",
+      "--output-ext-playlist"
+    ]
+  },
+  "OUTPUT_LIKED_SONGS": {
+    "default": "Liked Songs/{artist}_{song_name}",
+    "type": "str",
+    "flags": [
+      "-ol",
+      "--output-liked-songs"
+    ]
+  },
+  "SPLIT_ALBUM_DISCS": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--split-album-discs"
+    ]
+  },
+  "MAX_FILENAME_LENGTH": {
+    "default": "0",
+    "type": "int",
+    "flags": [
+      "--max-filename-length"
+    ]
+  },
+  "OPTIMIZED_DOWNLOADING": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--optimized-downloading"
+    ]
+  },
+  "DOWNLOAD_RATE_LIMITER": {
+    "default": "0.0",
+    "type": "float",
+    "flags": [
+      "-dlr",
+      "--download-rate-limiter"
+    ]
+  },
+  "BULK_WAIT_TIME": {
+    "default": "1.0",
+    "type": "float",
+    "flags": [
+      "--bulk-wait-time"
+    ]
+  },
+  "TEMP_DOWNLOAD_DIR": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "-td",
+      "--temp-download-dir"
+    ]
+  },
+  "DOWNLOAD_PARENT_ALBUM": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--download-parent-album"
+    ]
+  },
+  "NO_COMPILATION_ALBUMS": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--no-compilation-albums"
+    ]
+  },
+  "NO_VARIOUS_ARTISTS": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--no-various-artists"
+    ]
+  },
+  "NO_ARTIST_APPEARS_ON": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--no-artist-appears-on"
+    ]
+  },
+  "DISCOG_BY_ALBUM_ARTIST": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--discog-by-album-artist"
+    ]
+  },
+  "REGEX_ENABLED": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--regex-enabled"
+    ]
+  },
+  "REGEX_TRACK_SKIP": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--regex-track-skip"
+    ]
+  },
+  "REGEX_EPISODE_SKIP": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--regex-episode-skip"
+    ]
+  },
+  "REGEX_ALBUM_SKIP": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--regex-album-skip"
+    ]
+  },
+  "DOWNLOAD_FORMAT": {
+    "default": "flac",
+    "type": "str",
+    "flags": [
+      "--codec",
+      "--download-format"
+    ]
+  },
+  "DOWNLOAD_QUALITY": {
+    "default": "auto",
+    "type": "str",
+    "flags": [
+      "-q",
+      "--download-quality"
+    ]
+  },
+  "TRANSCODE_BITRATE": {
+    "default": "auto",
+    "type": "str",
+    "flags": [
+      "-b",
+      "--bitrate",
+      "--transcode-bitrate"
+    ]
+  },
+  "CUSTOM_FFMEPG_ARGS": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--custom-ffmpeg-args"
+    ]
+  },
+  "SONG_ARCHIVE_LOCATION": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--song-archive-location"
+    ]
+  },
+  "DISABLE_SONG_ARCHIVE": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--disable-song-archive"
+    ]
+  },
+  "DISABLE_DIRECTORY_ARCHIVES": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--disable-directory-archives"
+    ]
+  },
+  "SKIP_EXISTING": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "-ie",
+      "--skip-existing"
+    ]
+  },
+  "SKIP_PREVIOUSLY_DOWNLOADED": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "-ip",
+      "--skip-prev-downloaded",
+      "--skip-previously-downloaded"
+    ]
+  },
+  "SKIP_BY_ISRC": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "-ii",
+      "--skip-by-isrc"
+    ]
+  },
+  "EXPORT_M3U8": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "-e",
+      "--export-m3u8"
+    ]
+  },
+  "M3U8_LOCATION": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--m3u8-location"
+    ]
+  },
+  "OUTPUT_M3U8": {
+    "default": "{name}",
+    "type": "str",
+    "flags": [
+      "-om",
+      "--output-m3u8"
+    ]
+  },
+  "M3U8_REL_PATHS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--m3u8-relative-paths"
+    ]
+  },
+  "LIKED_SONGS_ARCHIVE_M3U8": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--liked-songs-archive-m3u8"
+    ]
+  },
+  "LYRICS_TO_METADATA": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--lyrics-to-metadata"
+    ]
+  },
+  "LYRICS_TO_FILE": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--lyrics-to-file"
+    ]
+  },
+  "LYRICS_LOCATION": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--lyrics-location"
+    ]
+  },
+  "OUTPUT_LYRICS": {
+    "default": "{artist}_{song_name}",
+    "type": "str",
+    "flags": [
+      "-oy",
+      "--output-lyrics"
+    ]
+  },
+  "ALWAYS_CHECK_LYRICS": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--always-check-lyrics"
+    ]
+  },
+  "LYRICS_MD_HEADER": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--lyrics-md-header"
+    ]
+  },
+  "LANGUAGE": {
+    "default": "en",
+    "type": "str",
+    "flags": [
+      "--language"
+    ]
+  },
+  "MD_DISC_TRACK_TOTALS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--md-disc-track-totals"
+    ]
+  },
+  "MD_SAVE_GENRES": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--md-save-genres"
+    ]
+  },
+  "MD_ALLGENRES": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--md-allgenres"
+    ]
+  },
+  "MD_GENREDELIMITER": {
+    "default": ", ",
+    "type": "str",
+    "flags": [
+      "--md-genredelimiter"
+    ]
+  },
+  "MD_ARTISTDELIMITER": {
+    "default": ", ",
+    "type": "str",
+    "flags": [
+      "--md-artistdelimiter"
+    ]
+  },
+  "SEARCH_QUERY_SIZE": {
+    "default": "10",
+    "type": "int",
+    "flags": [
+      "--search-query-size"
+    ]
+  },
+  "STRICT_LIBRARY_VERIFY": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--strict-library-verify"
+    ]
+  },
+  "ALBUM_ART_TO_FILE": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--album-art-to-file"
+    ]
+  },
+  "IMPORT_ZMD": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--import-zmd"
+    ]
+  },
+  "IMPORT_ZMD_LOCATION": {
+    "default": "./.zmd",
+    "type": "str",
+    "flags": [
+      "--import-zmd-location"
+    ]
+  },
+  "EXPORT_ZMD": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--export-zmd"
+    ]
+  },
+  "EXPORT_ZMD_LOCATION": {
+    "default": "./.zmd",
+    "type": "str",
+    "flags": [
+      "--export-zmd-location"
+    ]
+  },
+  "API_CLIENT_ID": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--client-id"
+    ]
+  },
+  "API_CREDENTIALS_LOCATION": {
+    "default": "",
+    "type": "str",
+    "flags": [
+      "--api-creds",
+      "--api-credentials-location"
+    ]
+  },
+  "API_CLIENT_LEGACY": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--client-legacy"
+    ]
+  },
+  "FETCH_TIMEOUT": {
+    "default": "30.0",
+    "type": "float",
+    "flags": [
+      "--fetch-timeout"
+    ]
+  },
+  "FETCH_DELAY": {
+    "default": "0.0",
+    "type": "float",
+    "flags": [
+      "--fetch-delay"
+    ]
+  },
+  "RETRY_ATTEMPTS": {
+    "default": "1",
+    "type": "int",
+    "flags": [
+      "--retry-attempts"
+    ]
+  },
+  "RETRY_DELAY": {
+    "default": "5.0",
+    "type": "float",
+    "flags": [
+      "--retry-delay"
+    ]
+  },
+  "ESCALATING_DELAY": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--escalating-delay"
+    ]
+  },
+  "CHUNK_SIZE": {
+    "default": "20000",
+    "type": "int",
+    "flags": [
+      "--chunk-size"
+    ]
+  },
+  "REDIRECT_TIMEOUT": {
+    "default": "120.0",
+    "type": "float",
+    "flags": [
+      "--redirect-timeout"
+    ]
+  },
+  "REDIRECT_ADDRESS": {
+    "default": "127.0.0.1",
+    "type": "str",
+    "flags": [
+      "--redirect-address"
+    ]
+  },
+  "REDIRECT_PORT": {
+    "default": "4381",
+    "type": "int",
+    "flags": [
+      "--redirect-port"
+    ]
+  },
+  "PRINT_SPLASH": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--print-splash"
+    ]
+  },
+  "PRINT_PROGRESS_INFO": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-progress-info"
+    ]
+  },
+  "PRINT_SKIPS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-skips"
+    ]
+  },
+  "PRINT_DOWNLOADS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-downloads"
+    ]
+  },
+  "PRINT_DOWNLOAD_PROGRESS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-download-progress"
+    ]
+  },
+  "PRINT_URL_PROGRESS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-url-progress"
+    ]
+  },
+  "PRINT_ALBUM_PROGRESS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-album-progress"
+    ]
+  },
+  "PRINT_ARTIST_PROGRESS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-artist-progress"
+    ]
+  },
+  "PRINT_PLAYLIST_PROGRESS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-playlist-progress"
+    ]
+  },
+  "PRINT_WARNINGS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-warnings"
+    ]
+  },
+  "PRINT_ERRORS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-errors"
+    ]
+  },
+  "PRINT_API_ERRORS": {
+    "default": "True",
+    "type": "bool",
+    "flags": [
+      "--print-api-errors"
+    ]
+  },
+  "STANDARD_INTERFACE": {
+    "default": "False",
+    "type": "bool",
+    "flags": [
+      "--standard-interface"
+    ]
+  },
+  "FFMPEG_LOG_LEVEL": {
+    "default": "error",
+    "type": "str",
+    "flags": [
+      "--ffmpeg-log-level"
+    ]
+  }
+}
