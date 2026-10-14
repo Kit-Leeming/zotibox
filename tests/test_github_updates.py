@@ -20,9 +20,9 @@ class Session:
 
 
 def release():
-    return {'tag_name':'v0.5.0','draft':False,'prerelease':False,'assets':[{'name':'ZotiBox-Setup-0.5.0.exe','state':'uploaded',
+    return {'tag_name':'v99.0.0','draft':False,'prerelease':False,'assets':[{'name':'ZotiBox-Setup-99.0.0.exe','state':'uploaded',
         'digest':'sha256:'+hashlib.sha256(b'installer').hexdigest(),'size':9,
-        'browser_download_url':'https://github.com/Kit-Leeming/zotibox/releases/download/v0.5.0/ZotiBox-Setup-0.5.0.exe'}]}
+        'browser_download_url':'https://github.com/Kit-Leeming/zotibox/releases/download/v99.0.0/ZotiBox-Setup-99.0.0.exe'}]}
 
 
 def test_release_and_checksum_validation(tmp_path):

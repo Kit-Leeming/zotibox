@@ -6,11 +6,13 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths
+from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
-    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget)
+    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider)
+from .artwork import thumbnail
+from .file_actions import recycle
 from .catalogue import Catalogue
 from .branding import icon_image, save_icon
 from .themes import make_theme, valid_theme, stylesheet, RowDelegate, ThemeDialog, selection_brush
@@ -178,6 +180,7 @@ class Window(QMainWindow):
         self.library_refresh.timeout.connect(self.refresh_files)
         self.reset_integrations()
         self.apply_theme(self.theme)
+        self.set_row_height(self.catalogue.get_setting("row_height",40))
         self.navigation.setCurrentRow(0)
         self.refresh()
 
@@ -207,13 +210,41 @@ class Window(QMainWindow):
         self.pages.addWidget(page)
         return layout
 
+    def row_size_control(self):
+        widget=QWidget();bar=QHBoxLayout(widget);bar.setContentsMargins(0,0,0,0)
+        bar.addWidget(QLabel("Row size"))
+        slider=QSlider(Qt.Orientation.Horizontal);slider.setRange(32,96);slider.setFixedWidth(120)
+        slider.setValue(self.catalogue.get_setting("row_height",40));slider.setToolTip("Row and cover thumbnail size")
+        slider.valueChanged.connect(self.set_row_height);bar.addWidget(slider)
+        return widget
+
+    def set_row_height(self,value):
+        self.catalogue.set_setting("row_height",value)
+        for table in self.findChildren(QTableWidget):
+            table.verticalHeader().setDefaultSectionSize(value);table.setIconSize(QSize(value-8,value-8))
+        for tree in self.findChildren(QTreeWidget):
+            tree.setIconSize(QSize(value-8,value-8));tree.doItemsLayout()
+        for slider in self.findChildren(QSlider):
+            if slider.toolTip()=="Row and cover thumbnail size":
+                block=QSignalBlocker(slider);slider.setValue(value);del block
+
+    def track_thumbnail(self,row):
+        path=row.get("path")
+        if row.get("kind")=="file":path=self.catalogue.resolve(row)
+        elif not path and row.get("recording_id"):
+            file=getattr(self,"_thumbnail_files",{}).get(row["recording_id"])
+            if file:path=self.catalogue.resolve(file)
+        return thumbnail(path,self.icon("music"))
+
     def table(self,columns):
         table=QTableWidget(0,len(columns))
         table.setHorizontalHeaderLabels(columns)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.verticalHeader().hide()
-        table.verticalHeader().setDefaultSectionSize(36)
+        table.verticalHeader().setDefaultSectionSize(self.catalogue.get_setting("row_height",40))
+        height=self.catalogue.get_setting("row_height",40)
+        table.setIconSize(QSize(height-8,height-8))
         table.horizontalHeader().setStretchLastSection(True)
         table.setShowGrid(False)
         table.setAlternatingRowColors(True)
@@ -245,7 +276,7 @@ class Window(QMainWindow):
         layout.addLayout(cards)
         bar=QHBoxLayout()
         for text,action,icon in [("Add music folder",self.add_root,"SP_DirOpenIcon"),("Local Music",lambda:self.navigation.setCurrentRow(2),"SP_DirIcon"),
-            ("Playlists",lambda:self.navigation.setCurrentRow(3),"SP_FileDialogListView"),("Setup",lambda:self.navigation.setCurrentRow(4),"SP_FileDialogDetailedView")]:
+            ("Playlists",lambda:self.navigation.setCurrentRow(3),"SP_FileDialogListView"),("Setup",lambda:self.navigation.setCurrentRow(4),"settings")]:
             bar.addWidget(self.button(text,action,icon))
         bar.addStretch()
         layout.addLayout(bar)
@@ -323,6 +354,7 @@ class Window(QMainWindow):
         self.duplicates=QCheckBox("Exact duplicates")
         self.duplicates.toggled.connect(self.refresh_files)
         bar.addWidget(self.duplicates)
+        bar.addWidget(self.row_size_control())
         bar.addWidget(self.button("Add folder",self.add_root,"SP_DirOpenIcon"))
         bar.addWidget(self.button("Add selected to playlist",self.add_selected,"SP_FileDialogListView"))
         layout.addLayout(bar)
@@ -333,6 +365,8 @@ class Window(QMainWindow):
         tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
         tree.setAlternatingRowColors(True)
         tree.setUniformRowHeights(True)
+        height=self.catalogue.get_setting("row_height",40)
+        tree.setIconSize(QSize(height-8,height-8))
         tree.setAllColumnsShowFocus(False)
         tree.setItemDelegate(RowDelegate(tree,lambda:self.theme))
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -376,7 +410,7 @@ class Window(QMainWindow):
         splitter.addWidget(panel)
         panel=QWidget()
         right=QVBoxLayout(panel)
-        right.setContentsMargins(0,0,0,0)
+        right.setContentsMargins(10,0,0,0)
         self.playlist_summary=muted("Select a playlist")
         right.addWidget(self.playlist_summary)
         self.entries_table=self.table(["#","Title","Artist","Length","Local match"])
@@ -397,7 +431,9 @@ class Window(QMainWindow):
         splitter.addWidget(panel)
         splitter.setSizes([250,1050])
         layout.addWidget(splitter,1)
-        layout.addWidget(self.button("Preview Rekordbox sync…",lambda:self.rb_panel.sync_local(),"SP_ArrowRight"))
+        actions.addWidget(self.button("Send / resync to Rekordbox…",lambda:self.rb_panel.sync_local(),"SP_ArrowRight",True))
+        right.addWidget(muted("Spotify workflow: Sync selected → Queue missing → Send / resync to Rekordbox → review and Apply."))
+        right.addWidget(self.row_size_control())
         self.rb_panel=RekordboxPanel(self)
         self.playlist_tabs.addTab(self.rb_panel,"Rekordbox")
 
@@ -769,6 +805,7 @@ class Window(QMainWindow):
             row["kind"]="file"
             item.setData(0,ROLE,row)
             item.setToolTip(0,str(path or row["relative_path"]))
+            item.setIcon(0,self.track_thumbnail(row))
             parent.addChild(item)
             if row["id"] in selected_ids:
                 item.setSelected(True)
@@ -778,6 +815,7 @@ class Window(QMainWindow):
         del block
 
     def fill_table(self,table,rows,values):
+        self._thumbnail_files={f["recording_id"]:f for f in self.catalogue.files() if f["available"]}
         block=QSignalBlocker(table)
         table.setRowCount(len(rows))
         for index,row in enumerate(rows):
@@ -786,6 +824,8 @@ class Window(QMainWindow):
                 item.setData(ROLE,row)
                 item.setToolTip(str(value))
                 table.setItem(index,column,item)
+                if column==(1 if table.horizontalHeaderItem(0).text()=="#" else 0):
+                    item.setIcon(self.track_thumbnail(row))
         del block
 
     def refresh_playlists(self):
@@ -1432,7 +1472,7 @@ class Window(QMainWindow):
             name=control.property("icon_name")
             if name:
                 control.setIcon(outline_icon(name,QColor(self.theme["selection_text" if control.property("primary") else "foreground"]["start"])))
-        for index,name in enumerate(["SP_ComputerIcon","SP_ArrowDown","SP_DirIcon","SP_FileDialogListView","SP_FileDialogDetailedView"]):
+        for index,name in enumerate(["SP_ComputerIcon","SP_ArrowDown","SP_DirIcon","SP_FileDialogListView","settings"]):
             self.navigation.item(index).setIcon(self.icon(name))
         for index,name in enumerate(["SP_DirIcon","SP_FileDialogDetailedView","SP_FileDialogContentsView","SP_ArrowDown","SP_DialogOpenButton","SP_BrowserReload","SP_FileDialogListView"]):
             self.settings_navigation.item(index).setIcon(self.icon(name))
@@ -1543,7 +1583,7 @@ class Window(QMainWindow):
         quality=" · ".join([row["codec"]]+([f"{row['sample_rate']} Hz"] if row["sample_rate"] else [])+
             ([f"{row['bits']} bit"] if row["bits"] else [])+([f"{row['bitrate']//1000} kbps"] if row["bitrate"] else []))
         text="\n".join([f"Title: {row['title']}",f"Artist: {row['artist']}",f"Album: {row['album']}",f"Path: {self.catalogue.resolve(row) or 'Not mapped'}",
-            f"Format: {quality}",f"Size: {row['size']/1024**2:.2f} MB",f"Duration: {duration(row['duration'])}",
+            f"Format: {quality}",f"Source: {self.catalogue.get_setting('audio_source_'+row['sha256'],'Unknown — a FLAC extension does not prove a lossless source')}",f"Size: {row['size']/1024**2:.2f} MB",f"Duration: {duration(row['duration'])}",
             f"Created: {date_ns(row['created_ns'])}",f"Modified: {date_ns(row['mtime_ns'])}",f"First indexed: {row['indexed_at']}",f"ISRC: {row['isrc'] or 'Not tagged'}",f"SHA-256: {row['sha256']}"])
         box=QMessageBox(self)
         box.setWindowTitle("File details")
@@ -1569,6 +1609,9 @@ class Window(QMainWindow):
             menu.addAction("File details",lambda:self.show_file_details(row))
             menu.addAction("Show in File Explorer",lambda:self.explorer(self.catalogue.resolve(row)))
             menu.addAction("Add selected to playlist",self.add_selected)
+            menu.addAction("Copy file path",lambda:QApplication.clipboard().setText(str(self.catalogue.resolve(row))))
+            menu.addSeparator()
+            menu.addAction("Delete selected files…",self.delete_selected_files)
         else:
             root=next((r for r in self.catalogue.roots() if r["id"]==row["root_id"]),None)
             folder=Path(root["path"])/row["folder"] if root and root["path"] else None
@@ -1584,12 +1627,33 @@ class Window(QMainWindow):
         self.playlist_list.setCurrentItem(item)
         playlist=item.data(ROLE)
         menu=QMenu(self)
+        menu.addAction("Rename playlist…",self.rename_current_playlist)
+        menu.addAction("Send / resync to Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
         if playlist["source"]=="spotify":
             menu.addAction("Sync from Spotify",self.sync_selected)
             menu.addAction("Make independent",self.detach_current)
         menu.addAction("Remove playlist",self.delete_current_playlist)
         menu.exec(self.playlist_list.viewport().mapToGlobal(point))
+
+    def rename_current_playlist(self):
+        if not self.playlist_id:return
+        playlist=next(p for p in self.catalogue.playlists() if p["id"]==self.playlist_id)
+        prompt="Name (Spotify sync will restore the Spotify name)" if playlist["source"]=="spotify" else "Name"
+        name,ok=QInputDialog.getText(self,"Rename playlist",prompt,text=playlist["name"])
+        if ok and name.strip():
+            self.catalogue.rename_playlist(self.playlist_id,name.strip());self.refresh_playlists()
+
+    def delete_selected_files(self):
+        try:
+            self.ensure_idle()
+            rows=self.selected_files()
+            if not rows:return
+            paths=[str(self.catalogue.resolve(r)) for r in rows]
+            if QMessageBox.question(self,"Delete music files",f"Move {len(rows)} selected music file(s) to the Recycle Bin?\nPlaylist references will become missing. Rekordbox is unchanged.\n\n"+"\n".join(paths[:12]))!=QMessageBox.StandardButton.Yes:return
+            for row in rows:self.catalogue.remove_file(row["id"],recycle)
+            self.refresh()
+        except Exception as exc:self.refresh();self.show_error(exc)
 
     def detach_current(self):
         self.catalogue.detach_playlist(self.playlist_id)

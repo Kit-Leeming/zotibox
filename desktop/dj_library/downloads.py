@@ -188,6 +188,9 @@ class DownloadEngine:
                 self.event("connected", "")
             elif kind == "source":
                 source_format = message["format"]
+                offered=message.get("available_formats",[])
+                self.catalogue.set_setting("spotify_formats_"+track_id,offered)
+                if job_id:self.catalogue.update_download(job_id,message=source_description(source_format))
             elif kind == "error":
                 errors.append(message.get("message", "Zotify failed"))
             self.event("refresh", "")
@@ -299,9 +302,10 @@ class DownloadEngine:
                     rows = [row for row in self.catalogue.files() if self.catalogue.resolve(row) == destination]
                     if not rows:
                         raise ValueError("Downloaded file was not indexed")
+                    self.catalogue.set_setting("audio_source_"+rows[0]["sha256"],source_description(source_format))
                     self.catalogue.decide_match(track["id"], rows[0]["recording_id"], "download", f"Downloaded exact Spotify ID; source {source_format}")
                     self.catalogue.update_download(job["id"], state="complete", progress=100,
-                        message=f"Complete · source {source_format}", output=str(destination))
+                        message=f"Complete · {source_description(source_format)}", output=str(destination))
                     self.cleanup(stage)
                 except InterruptedError:
                     current = next(row for row in self.catalogue.download_jobs() if row["id"] == job["id"])
@@ -317,3 +321,9 @@ class DownloadEngine:
             return "Queue paused" if self.cancel.is_set() else "Queue finished"
         finally:
             self.run_lock.release()
+
+
+def source_description(format):
+    if format in {"FLAC_FLAC","FLAC_FLAC_24BIT"}:return f"Lossless Spotify source: {format}"
+    if format=="unverified":return "Source quality unverified (file extension does not prove lossless)"
+    return f"Lossy Spotify source: {format} (FLAC output remains lossy)"

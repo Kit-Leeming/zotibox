@@ -418,6 +418,26 @@ class Catalogue:
             db.execute("UPDATE playlists SET source='manual',spotify_id=NULL,snapshot=NULL WHERE id=?", (playlist_id,))
             self.change(db, "playlist", playlist_id, "detach")
 
+    def rename_playlist(self, playlist_id, name):
+        if not name.strip():raise ValueError("Playlist name cannot be empty")
+        with self.connect() as db:
+            db.execute("UPDATE playlists SET name=? WHERE id=?",(name.strip(),playlist_id))
+            self.change(db,"playlist",playlist_id,"rename")
+
+    def remove_file(self, file_id, remove):
+        with self.scan_lock:
+            row=next((r for r in self.files() if r["id"]==file_id),None)
+            if not row:raise ValueError("File is no longer in the catalogue")
+            path=self.resolve(row)
+            if not path or not path.is_file():raise ValueError("File is missing or unmapped")
+            with path.open("rb") as stream:digest=hashlib.file_digest(stream,"sha256").hexdigest()
+            if path.stat().st_size!=row["size"] or digest!=row["sha256"]:
+                raise ValueError("File changed since scanning; scan again before deleting")
+            remove(path)
+            with self.connect() as db:
+                db.execute("UPDATE files SET available=0 WHERE id=?",(file_id,))
+                self.change(db,"file",file_id,"recycle")
+
     def delete_playlist(self, playlist_id):
         with self.connect() as db:
             db.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))

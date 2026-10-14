@@ -87,7 +87,7 @@ def main(arguments):
         def get_file(self, files):
             result = original_get(self, files)
             if result:
-                emit("source", format=AudioFile.Format.Name(result.format))
+                emit("source", format=AudioFile.Format.Name(result.format), available_formats=sorted({AudioFile.Format.Name(f.format) for f in files if f.HasField("format")}))
             return result
         FormatOnlyAudioQuality.get_file = get_file
         if args.authenticate:

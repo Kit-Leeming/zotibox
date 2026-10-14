@@ -11,7 +11,19 @@ def icon(name,colour):
     p.setPen(QPen(colour,1.6,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
     p.setBrush(Qt.BrushStyle.NoBrush)
     def line(x1,y1,x2,y2):p.drawLine(QPointF(x1,y1),QPointF(x2,y2))
-    if name in {"SP_DirIcon","SP_DirOpenIcon"}:
+    if name=="settings":
+        import math
+        points=[]
+        for i in range(32):
+            radius=8 if i%4 in (0,1) else 6
+            angle=i*math.pi/16
+            points.append(QPointF(10+radius*math.cos(angle),10+radius*math.sin(angle)))
+        p.drawPolygon(QPolygonF(points));p.drawEllipse(QRectF(7,7,6,6))
+    elif name=="music":
+        p.drawRoundedRect(QRectF(1,1,18,18),3,3)
+        line(9,6,9,14);line(9,6,15,4);line(15,4,15,12)
+        p.drawEllipse(QRectF(5,12,4,3));p.drawEllipse(QRectF(11,10,4,3))
+    elif name in {"SP_DirIcon","SP_DirOpenIcon"}:
         p.drawPolygon(QPolygonF([QPointF(2,6),QPointF(8,6),QPointF(10,8),QPointF(18,8),QPointF(18,17),QPointF(2,17)]))
     elif name=="SP_ComputerIcon":
         p.drawPolyline(QPolygonF([QPointF(2,9),QPointF(10,2),QPointF(18,9)]))

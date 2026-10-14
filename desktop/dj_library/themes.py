@@ -110,6 +110,12 @@ class RowDelegate(QStyledItemDelegate):
         super().__init__(view)
         self.view, self.get_theme = view, get_theme
 
+    def sizeHint(self, option, index):
+        size=super().sizeHint(option,index)
+        height=self.view.iconSize().height()+8
+        size.setHeight(max(size.height(),height))
+        return size
+
     def paint(self, painter, option, index):
         if not option.state & QStyle.StateFlag.State_Selected:
             option.state &= ~QStyle.StateFlag.State_HasFocus
@@ -147,35 +153,41 @@ def stylesheet(theme):
         QLabel#heading {{ font-size:25px; font-weight:600; }}
         QLabel#metric {{ font-size:30px; font-weight:600; }}
         QLabel[muted=true] {{ color:{t['muted']}; }}
-        #navigation::item {{ padding:13px 10px; margin:3px 0; border-radius:5px; }}
+        #navigation::item {{ padding:13px 10px; margin:3px 0; border-radius:6px; }}
         #navigation::item:selected {{ background:{t['surface']}; color:{theme['accent']['start']}; }}
         #navigation::item:hover {{ background:{t['surface']}; }}
         #card {{ background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; }}
-        QPushButton {{ font-family:'Segoe UI'; background:{t['surface']}; border:1px solid {t['border']}; border-radius:5px; padding:8px 12px; }}
+        QPushButton {{ font-family:'Segoe UI'; background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; padding:8px 12px; }}
         QPushButton:hover {{ border-color:{theme['accent']['start']}; }}
         QPushButton:disabled {{ color:{t['muted']}; }}
         #windowcontrol, #windowclose {{background:transparent;border:0;border-radius:0;padding:0;font-size:20px;}}
         #windowcontrol:hover {{background:{t['surface']};}}
         #windowclose:hover {{background:#b83a42;color:white;}}
         QPushButton[primary=true] {{ background:{t['accent']}; color:{t['selection_text']}; border-color:{theme['accent']['start']}; font-weight:600; }}
-        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background:{t['surface']}; border:1px solid {t['border']}; border-radius:5px; padding:9px; }}
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; padding:9px; }}
         QLineEdit:focus, QComboBox:focus {{ border-color:{theme['accent']['start']}; }}
         QComboBox::drop-down {{ border:0; width:26px; }}
         QComboBox QAbstractItemView {{ background:{t['surface']}; color:{t['foreground']}; border:1px solid {t['border']}; outline:0; selection-background-color:{theme['selection']['start']}; selection-color:{t['selection_text']}; padding:4px; }}
         QComboBox QAbstractItemView::item {{ min-height:28px; padding:5px; }}
-        QTableWidget, QTreeWidget, QListWidget {{ background:{t['surface']}; alternate-background-color:{t['alternate']}; border:1px solid {t['border']}; border-radius:0; outline:0; selection-background-color:{theme['selection']['start']}; selection-color:{t['selection_text']}; }}
+        QTableWidget, QTreeWidget, QListWidget {{ background:{t['surface']}; alternate-background-color:{t['alternate']}; border:1px solid {t['border']}; border-radius:6px; outline:0; selection-background-color:{theme['selection']['start']}; selection-color:{t['selection_text']}; }}
         QTreeWidget::item, QTableWidget::item {{ border:0; border-radius:0; margin:0; padding:0; }}
         QHeaderView::section {{ background:{t['sidebar']}; color:{t['muted']}; padding:10px 8px; border:0; border-bottom:1px solid {t['border']}; }}
         QMenu {{ background:{t['surface']}; border:1px solid {t['border']}; padding:5px; }}
         QMenu::item {{ padding:8px 22px; }}
         QMenu::item:selected {{ background:{theme['selection']['start']}; color:{t['selection_text']}; }}
-        QSplitter::handle {{ background:{t['border']}; width:2px; height:2px; }}
+        QSplitter::handle {{ background:{t['surface']}; width:10px; height:10px; }}
+        QSplitter::handle:hover {{ background:{t['border']}; }}
         QCheckBox {{ spacing:8px; }}
         QProgressBar {{ border:0; background:{t['surface']}; border-radius:3px; }}
         QProgressBar::chunk {{ background:{t['accent']}; }}
         QScrollArea {{ background:transparent; border:0; }}
-        QScrollBar:vertical {{ background:{t['surface']}; width:10px; }}
-        QScrollBar::handle:vertical {{ background:{t['border']}; border-radius:4px; min-height:24px; }}
+        QScrollBar:vertical {{ background:{t['surface']}; width:14px; }}
+        QScrollBar::handle:vertical {{ background:{t['muted']}; border:3px solid {t['surface']}; border-radius:6px; min-height:30px; }}
+        QScrollBar:horizontal {{ background:{t['surface']}; height:14px; }}
+        QScrollBar::handle:horizontal {{ background:{t['muted']}; border:3px solid {t['surface']}; border-radius:6px; min-width:30px; }}
+        QScrollBar::handle:hover {{ background:{theme['accent']['start']}; }}
+        QScrollBar::add-line, QScrollBar::sub-line {{width:0;height:0;}}
+        QScrollBar::add-page, QScrollBar::sub-page {{background:transparent;}}
         QSlider::groove:horizontal {{ background:{t['border']}; height:6px; }}
         QSlider::handle:horizontal {{ background:{theme['accent']['start']}; width:14px; margin:-5px 0; border-radius:7px; }}
         QTabWidget::pane {{border:0;}}

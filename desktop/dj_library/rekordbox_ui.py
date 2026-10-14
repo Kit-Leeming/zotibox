@@ -2,7 +2,7 @@
 from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
-    QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog)
+    QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication)
 from .rekordbox import Rekordbox
 
 ROLE=Qt.ItemDataRole.UserRole
@@ -26,18 +26,24 @@ class RekordboxPanel(QWidget):
         from .themes import RowDelegate
         self.tree=type(owner.files_table)(lambda:owner.theme)
         self.tree.setItemDelegate(RowDelegate(self.tree,lambda:owner.theme))
-        self.tree.setHeaderHidden(True);self.tree.setStyleSheet("QTreeWidget::item {min-height:30px;}")
+        self.tree.setHeaderHidden(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.tree_context)
+        self.tree.itemExpanded.connect(self.save_expansion);self.tree.itemCollapsed.connect(self.save_expansion)
         self.tree.currentItemChanged.connect(self.refresh_tracks)
         split.addWidget(self.tree)
         self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length"])
         for column,width in enumerate([45,300,210,160,75,100,70]):self.table.setColumnWidth(column,width)
+        self.table.customContextMenuRequested.connect(self.track_context)
+        self.table.setContentsMargins(8,0,0,0)
+        split.setHandleWidth(12)
         split.addWidget(self.table);split.setSizes([260,1050]);layout.addWidget(split,1)
         bar=QHBoxLayout()
         for text,fn,icon in [("Edit metadata…",self.edit,"SP_FileDialogDetailedView"),("Add to playlist…",self.add,"SP_ArrowRight"),
                 ("Move up",lambda:self.move(-1),"SP_ArrowUp"),("Move down",lambda:self.move(1),"SP_ArrowDown"),
                 ("Remove entry",self.remove,"SP_DialogCancelButton")]:
             bar.addWidget(owner.button(text,fn,icon))
-        bar.addStretch();layout.addLayout(bar)
+        bar.addStretch();bar.addWidget(owner.row_size_control());layout.addLayout(bar)
         self.summary=QLabel("Connect to Rekordbox in Settings, or refresh to inspect a copy of its library.")
         self.summary.setWordWrap(True);layout.addWidget(self.summary)
         bar=QHBoxLayout()
@@ -78,10 +84,44 @@ class RekordboxPanel(QWidget):
             parent=items.get(p["parent"])
             if parent:parent.addChild(items[p["id"]])
             else:self.tree.addTopLevelItem(items[p["id"]])
-        self.tree.expandAll();self.tree.setCurrentItem(items.get(previous,collection));self.tree.blockSignals(False)
+        expanded=set(self.owner.catalogue.get_setting("rekordbox_expanded",[]))
+        for id_,item in items.items():item.setExpanded(id_ in expanded)
+        self.tree.setCurrentItem(items.get(previous,collection));self.tree.blockSignals(False)
         self.refresh_tracks()
         n=len(self.data["changes"])
         self.summary.setText(f"{len(self.data['tracks'])} tracks · {n} pending change(s). Changes affect only the preview until Apply.")
+
+    def save_expansion(self,*_):
+        expanded=[]
+        def visit(item):
+            if item.isExpanded() and item.data(0,ROLE):expanded.append(item.data(0,ROLE))
+            for i in range(item.childCount()):visit(item.child(i))
+        for i in range(self.tree.topLevelItemCount()):visit(self.tree.topLevelItem(i))
+        self.owner.catalogue.set_setting("rekordbox_expanded",expanded)
+
+    def tree_context(self,point):
+        item=self.tree.itemAt(point)
+        if not item:return
+        self.tree.setCurrentItem(item);menu=QMenu(self)
+        menu.addAction("New playlist…",lambda:self.create(False));menu.addAction("New folder…",lambda:self.create(True))
+        if self.current_playlist():menu.addAction("Rename…",self.rename)
+        menu.addAction("Collapse all folders",self.tree.collapseAll)
+        menu.exec(self.tree.viewport().mapToGlobal(point))
+
+    def track_context(self,point):
+        row=self.table.rowAt(point.y())
+        if row<0:return
+        if not self.table.item(row,0).isSelected():self.table.selectRow(row)
+        selected=self.selected();menu=QMenu(self)
+        if len(selected)==1:
+            menu.addAction("Edit metadata…",self.edit)
+            menu.addAction("Show in File Explorer",lambda:self.owner.explorer(selected[0]["path"]))
+            menu.addAction("Copy file path",lambda:QApplication.clipboard().setText(selected[0]["path"]))
+        menu.addAction("Add to playlist…",self.add)
+        if len(selected)==1 and selected[0].get("song_id"):
+            menu.addAction("Move up",lambda:self.move(-1));menu.addAction("Move down",lambda:self.move(1))
+            menu.addAction("Remove from playlist",self.remove)
+        menu.exec(self.table.viewport().mapToGlobal(point))
 
     def refresh_tracks(self,*_):
         id_=self.current_playlist();tracks={t["id"]:t for t in self.data["tracks"]}
@@ -172,6 +212,10 @@ class RekordboxPanel(QWidget):
         id_=self.owner.playlist_id
         if not id_:return
         playlist=next(p for p in self.owner.catalogue.playlists() if p["id"]==id_)
+        missing=[e for e in self.owner.catalogue.entries(id_) if not e["recording_id"] or not self.owner.catalogue.available_recording(e["recording_id"])]
+        if missing:
+            QMessageBox.information(self,"Tracks needed before Rekordbox sync",f"{len(missing)} track(s) need a local file. Use Queue missing to download them, or Review match to connect existing files, then send this playlist again.")
+            return
         def work():
             if not self.backend.state:self.backend.connect()
             self.backend.sync_local(id_,playlist["rekordbox_id"])

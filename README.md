@@ -6,6 +6,7 @@ Windows music catalogue, Spotify playlists, Zotify downloads and Rekordbox manag
 
 Download the Windows installer from [Releases](https://github.com/Kit-Leeming/zotibox/releases/latest).
 Install over the existing app folder when updating; uninstalling is unnecessary.
+No Python environment or P: drive is required. The default installation is in your Windows user profile.
 The app creates **ZotiBox Database** beside its EXE. Settings → Database can relocate it.
 Settings → Updates checks GitHub and downloads a checksum-verified installer.
 
@@ -22,11 +23,14 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
 ## Use
 
 - **Downloads:** search or paste a Spotify track/album/playlist URL, queue tracks and start.
-  Downloads run sequentially at real-time speed. FLAC output does not guarantee a lossless source.
+  Downloads run sequentially at real-time speed. Results and file details show the selected source format.
+  FLAC output does not guarantee a lossless source; the fork may fall back when requesting lossless.
 - **Local Music:** search the folder tree; right-click for details, Explorer and playlist actions.
+  Use Row size to adjust thumbnails. File deletion prompts before using the Windows Recycle Bin.
   Discovery can run alongside downloads and Spotify tasks. Existing music is never replaced automatically.
 - **Playlists:** create local playlists or link owned/collaborative Spotify playlists.
-  Linked membership and order follow Spotify. Export settings and M3U8 are here.
+  Linked membership and order follow Spotify. To update Rekordbox: **Sync selected → Queue missing →
+  Start downloads → Send / resync to Rekordbox → review → Apply**. Export settings and M3U8 are here.
 - **Playlists → Rekordbox:** view the collection/folders, prepare playlists and metadata edits,
   or preview a ZotiBox playlist sync. Review changes before Apply.
 - **Settings → Appearance:** choose a visual preset or edit background/accent colours.
@@ -34,6 +38,7 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
 
 ## Rekordbox backups and writes
 
+Rekordbox can stay open for viewing and preparing previews; close it for Backup, Apply or Restore.
 Writes are disabled initially. You can first use Rekordbox's **File → Library → Backup Library**.
 Close Rekordbox, then enable writes in Settings → Rekordbox; ZotiBox verifies a data-directory backup.
 Every Apply and Restore creates another backup. External music files are excluded from these backups.
