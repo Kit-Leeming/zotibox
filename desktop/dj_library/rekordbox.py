@@ -147,13 +147,20 @@ class Rekordbox:
             from pyrekordbox.db6.tables import DjmdContent
             tracks=[]
             content_query=db.get_content().options(*(joinedload(getattr(DjmdContent,name)) for name in ["Artist","Album","Genre","Key","Label","Color"]))
+            cues={}
+            from pyrekordbox.db6.tables import DjmdCue
+            for cue in db.session.query(DjmdCue):
+                if cue.InMsec is None or cue.InMsec<0:continue
+                label=cue.Comment or ("Loop" if cue.Kind==4 else "Load point" if cue.Kind==3 else "Cue / memory point")
+                position=cue.InMsec/1000
+                cues.setdefault(cue.ContentID,[]).append({"position":position,"end":max(position,(cue.OutMsec or 0)/1000),"label":f"{label} · {int(position)//60}:{int(position)%60:02d}"})
             for content in content_query:
                 tracks.append({"id":content.ID,"title":content.Title or "","artist":content.ArtistName or "",
                     "album":content.AlbumName or "","genre":content.GenreName or "","key":content.KeyName or "",
                     "label":content.LabelName or "","rating":round((content.Rating or 0)/51),
                     "color_id":content.ColorID or "","color":content.ColorName or "", "comment":content.Commnt or "",
                     "year":content.ReleaseYear or 0,"track_no":content.TrackNo or 0,
-                    "duration":content.Length or 0,"path":content.FolderPath or ""})
+                    "duration":content.Length or 0,"path":content.FolderPath or "","cues":cues.get(content.ID,[])})
             playlists=[{"id":p.ID,"name":p.Name,"parent":p.ParentID,"type":p.Attribute,"seq":p.Seq,
                 "songs":[{"id":s.ID,"track_id":s.ContentID,"position":s.TrackNo} for s in sorted(p.Songs,key=lambda s:s.TrackNo)]}
                 for p in db.get_playlist() if p.ID not in SPECIAL]
@@ -277,6 +284,34 @@ class Rekordbox:
         self.state["links"][playlist_id]=result;self.save()
         return result
 
+    def reorder_playlist(self,id_,song_ids):
+        def operation(db):
+            playlist=self.playlist(db,id_,True)
+            songs={s.ID:s for s in playlist.Songs}
+            if len(song_ids)!=len(set(song_ids)) or set(song_ids)!=set(songs):raise ValueError("Playlist changed; refresh before reordering")
+            for position,song_id in enumerate(song_ids,1):db.move_song_in_playlist(playlist,songs[song_id],position)
+        return self.stage("Reorder Rekordbox playlist",operation)
+
+    def add_recordings(self,playlist_id,recording_ids):
+        files=self.catalogue.files();paths=[]
+        for id_ in recording_ids:
+            row=next((r for r in files if r["recording_id"]==id_ and r["available"] and (p:=self.catalogue.resolve(r)) and p.is_file()),None)
+            if not row:raise ValueError("Download or match every dragged track before adding to Rekordbox")
+            paths.append((self.catalogue.resolve(row),row))
+        def operation(db):
+            from pyrekordbox.db6 import tables
+            playlist=self.playlist(db,playlist_id,True)
+            existing={}
+            for content in db.get_content():existing.setdefault(os.path.normcase(os.path.normpath(content.FolderPath or "")),[]).append(content)
+            for path,row in paths:
+                key=os.path.normcase(os.path.normpath(str(path)));matches=existing.get(key,[])
+                if len(matches)>1:raise ValueError("Multiple Rekordbox identities share this file; resolve that ambiguity first")
+                content=matches[0] if matches else db.add_content(path,Title=row["title"],Length=int(row["duration"]),ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
+                existing[key]=[content];db.add_to_playlist(playlist,content)
+        result=self.stage(f"Add {len(paths)} local track(s) to Rekordbox playlist",operation)
+        self.state.setdefault("imported_files",[]).extend({"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths)
+        self.save();return result
+
     def backups(self):
         return sorted((self.root/"backups").glob("*.zip"),reverse=True)
 
@@ -388,6 +423,10 @@ class Rekordbox:
                     path=Path(file["path"])
                     if not path.is_file() or (path.stat().st_size,path.stat().st_mtime_ns)!=(file["size"],file["mtime_ns"]):
                         raise ValueError("A local music file changed since the preview; scan and prepare the sync again")
+            for file in self.state.get("imported_files",[]):
+                path=Path(file["path"])
+                if not path.is_file() or (path.stat().st_size,path.stat().st_mtime_ns)!=(file["size"],file["mtime_ns"]):
+                    raise ValueError("An imported music file changed since the preview; discard and prepare it again")
             wal=self.source.with_name(self.source.name+"-wal")
             if wal.exists() and wal.stat().st_size:
                 raise ValueError("Rekordbox has an uncheckpointed journal. Open and fully close Rekordbox, then refresh the preview")

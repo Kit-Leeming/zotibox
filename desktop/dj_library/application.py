@@ -1,3 +1,5 @@
+import json
+import time
 import argparse
 import sys
 from pathlib import Path
@@ -14,7 +16,9 @@ def main():
     parser.add_argument("--workspace",type=Path)
     parser.add_argument("--client-id")
     parser.add_argument("--smoke-test",type=Path)
+    parser.add_argument("--smoke-track",type=Path)
     args=parser.parse_args()
+    if args.smoke_track and not args.smoke_test:parser.error("--smoke-track requires --smoke-test")
     app=QApplication(sys.argv[:1])
     app.setApplicationName("ZotiBox")
     app.setOrganizationName("ZotiBox")
@@ -39,12 +43,24 @@ def main():
         window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         window.resize(1500,900)
         window.show()
+        deadline=time.monotonic()+12
+        if args.smoke_track:
+            window.player.audio.setVolume(0)
+            window.player.load(args.smoke_track,"Muted player validation",autoplay=True)
         def capture():
+            if args.smoke_track:
+                ready=not window.player.jobs and bool(window.player.wave.peaks) and window.player.media.position()>100
+                if not ready and time.monotonic()<deadline:QTimer.singleShot(100,capture);return
+                args.smoke_test.mkdir(parents=True,exist_ok=True)
+                (args.smoke_test/"player.json").write_text(json.dumps({"ready":ready,"duration_ms":window.player.media.duration(),"position_ms":window.player.media.position(),"waveform_peaks":len(window.player.wave.peaks),"error":window.player.media.errorString()}),encoding="utf-8")
+                if not ready:window.player.shutdown();app.exit(1);return
+                window.player.media.setPosition(1000)
             args.smoke_test.mkdir(parents=True,exist_ok=True)
             for index,name in enumerate(["dashboard","downloads","local-music","playlists","settings"]):
                 window.navigation.setCurrentRow(index)
                 app.processEvents()
                 window.grab().save(str(args.smoke_test/f"{name}.png"))
+            window.player.shutdown()
             app.quit()
         QTimer.singleShot(300,capture)
     else:

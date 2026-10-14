@@ -26,6 +26,8 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
   Downloads run sequentially at real-time speed. Results and file details show the selected source format.
   FLAC output does not guarantee a lossless source; the fork may fall back when requesting lossless.
 - **Local Music:** search the folder tree; right-click for details, Explorer and playlist actions.
+  Drag songs into local playlists or Rekordbox previews; hover navigation/tabs to switch while dragging.
+  Drag within editable playlists to reorder. Spotify-linked membership stays controlled by Spotify.
   Use Row size to adjust thumbnails. File deletion prompts before using the Windows Recycle Bin.
   Discovery can run alongside downloads and Spotify tasks. Existing music is never replaced automatically.
 - **Playlists:** create local playlists or link owned/collaborative Spotify playlists.
@@ -33,6 +35,10 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
   Start downloads → Send / resync to Rekordbox → review → Apply**. Export settings and M3U8 are here.
 - **Playlists → Rekordbox:** view the collection/folders, prepare playlists and metadata edits,
   or preview a ZotiBox playlist sync. Review changes before Apply.
+- Double-click a local track to play. The player includes volume, a seekable waveform and the cue/loop
+  points available in the connected Rekordbox database. Cue markers are read-only; this is a preview player.
+- Playlist pickers have search and filters. Spotify does not expose its playlist folder structure through
+  the Web API. Dashboard shows recent completed downloads.
 - **Settings → Appearance:** choose a visual preset or edit background/accent colours.
   Harmony swatches stay anchored while choosing gradient endpoints.
 

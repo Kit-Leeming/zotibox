@@ -31,7 +31,7 @@ def test_desktop_scan_playlist_and_export_workflow(application, tmp_path, monkey
     assert window.files_table.topLevelItem(0).childCount() == 2
     monkeypatch.setattr(QInputDialog, "getText", lambda *args: ("Test set", True))
     window.new_playlist()
-    monkeypatch.setattr(QInputDialog, "getItem", lambda *args: (args[3][0], True))
+    monkeypatch.setattr("dj_library.ui.choose_playlist", lambda items,*args: items[0])
     window.files_table.selectAll()
     window.add_selected()
     assert window.entries_table.rowCount() == 2

@@ -22,7 +22,7 @@ try {
     if (-not (Test-Path -LiteralPath $compilerPath)) { throw 'Executable built; install Inno Setup and provide ISCC.exe to build the installer.' }
     & $compilerPath build\installer.iss
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    Get-FileHash -Algorithm SHA256 'dist\ZotiBox\ZotiBox.exe','dist\ZotiBox-Setup-0.5.0.exe'
+    Get-FileHash -Algorithm SHA256 'dist\ZotiBox\ZotiBox.exe','dist\ZotiBox-Setup-0.6.0.exe'
 } finally {
     $env:PATH = $taskOriginalPath
     Pop-Location

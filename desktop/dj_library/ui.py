@@ -11,6 +11,9 @@ from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QP
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
     QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider)
+from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTabs
+from .playlist_picker import choose_playlist
+from .player import MusicPlayer
 from .artwork import thumbnail
 from .file_actions import recycle
 from .catalogue import Catalogue
@@ -72,7 +75,7 @@ class LibraryItem(QTreeWidgetItem):
             return left[key]<right[key]
         return self.text(column).casefold()<other.text(column).casefold()
 
-class LibraryTree(QTreeWidget):
+class LibraryTree(DragMixin,QTreeWidget):
     def __init__(self,get_theme):
         super().__init__()
         self.get_theme=get_theme
@@ -127,7 +130,7 @@ class Window(QMainWindow):
         brand.setObjectName("brand")
         side.addWidget(brand)
         side.addSpacing(24)
-        self.navigation=QListWidget()
+        self.navigation=HoverNavigation()
         self.navigation.setObjectName("navigation")
         self.navigation.addItems(["Dashboard","Downloads","Local Music","Playlists","Settings / Setup"])
         side.addWidget(self.navigation)
@@ -154,6 +157,9 @@ class Window(QMainWindow):
         self.build_library()
         self.build_playlists()
         self.build_settings()
+        self.player=MusicPlayer(self)
+        layout.addWidget(self.player)
+        self.setup_dragdrop()
         footer=QHBoxLayout()
         self.status=muted("Ready")
         footer.addWidget(self.status,1)
@@ -183,6 +189,81 @@ class Window(QMainWindow):
         self.set_row_height(self.catalogue.get_setting("row_height",40))
         self.navigation.setCurrentRow(0)
         self.refresh()
+
+    def play_row(self,row):
+        try:
+            if not row or row.get("kind")=="folder":return
+            path=row.get("path") or row.get("output")
+            if row.get("kind")=="file":path=self.catalogue.resolve(row)
+            if not path and row.get("recording_id"):
+                file=next((f for f in self.catalogue.files() if f["recording_id"]==row["recording_id"] and f["available"]),None)
+                path=self.catalogue.resolve(file) if file else None
+            if not path:raise ValueError("Download or match a local file before playback")
+            native=next((t for t in self.rb_panel.data["tracks"] if os.path.normcase(t["path"])==os.path.normcase(str(path))),None)
+            cues=row.get("cues",native.get("cues",[]) if native else [])
+            self.player.load(path,f"{row.get('artist','')} — {row.get('title',Path(path).stem)}",cues)
+        except Exception as exc:self.show_error(exc)
+
+    def recent_context(self,point):
+        row=self.recent_table.rowAt(point.y())
+        if row<0:return
+        data=self.recent_table.item(row,0).data(ROLE);menu=QMenu(self)
+        menu.addAction("Play / preview",lambda:self.play_row(data))
+        menu.addAction("Show in File Explorer",lambda:self.explorer(data["output"]))
+        menu.exec(self.recent_table.viewport().mapToGlobal(point))
+
+    def drag_data(self,rows,entries=False,native=False):
+        recordings=[];files=self.catalogue.files()
+        for row in rows:
+            id_=row.get("recording_id")
+            path=row.get("path") or row.get("output")
+            if not id_ and path:
+                file=next((f for f in files if os.path.normcase(str(self.catalogue.resolve(f)))==os.path.normcase(str(path))),None)
+                id_=file["recording_id"] if file else None
+            if id_:recordings.append(id_)
+        if not recordings and not native:return None
+        return {"workspace":str(self.catalogue.workspace),"recordings":recordings,
+            "entries":[r["id"] for r in rows] if entries else [],"playlist":self.playlist_id if entries else None,
+            "native_tracks":[r["id"] for r in rows] if native else [],
+            "native_songs":[r.get("song_id") for r in rows] if native else [],
+            "native_playlist":self.rb_panel.current_playlist() if native else None}
+
+    def validate_drag(self,data):
+        if data.get("workspace")!=str(self.catalogue.workspace):raise ValueError("These tracks come from a different database")
+        ids=data.get("recordings",[])
+        if not isinstance(ids,list) or len(ids)>10000 or any(not isinstance(i,str) for i in ids):raise ValueError("Invalid track selection")
+        known={f["recording_id"] for f in self.catalogue.files()}
+        if any(i not in known for i in ids):raise ValueError("A dragged track is no longer in this catalogue")
+        return ids
+
+    def drop_local(self,data,point,on_list=False):
+        try:
+            ids=self.validate_drag(data)
+            item=self.playlist_list.itemAt(point) if on_list else self.playlist_list.currentItem()
+            if not item:return False
+            playlist=item.data(ROLE)
+            if playlist["source"]!="manual":raise ValueError("Spotify controls this playlist. Drop into an independent local playlist instead.")
+            if not on_list and data.get("playlist")==playlist["id"] and data.get("entries"):
+                existing=[r["id"] for r in self.catalogue.entries(playlist["id"])]
+                moved=[i for i in existing if i in data["entries"]]
+                target=self.entries_table.rowAt(point.y());target=target if target>=0 else len(existing)
+                position=len([i for i in existing[:target] if i not in moved]);remaining=[i for i in existing if i not in moved]
+                self.catalogue.reorder(playlist["id"],remaining[:position]+moved+remaining[position:])
+            else:
+                if not ids:raise ValueError("Scan these tracks into Local Music before adding to a local playlist")
+                self.catalogue.add_entries(playlist["id"],ids)
+            self.playlist_id=playlist["id"];self.refresh_playlists();self.status.setText("Playlist updated");return True
+        except Exception as exc:self.show_error(exc);return False
+
+    def setup_dragdrop(self):
+        self.files_table.setDragEnabled(True);self.files_table.drag_payload=lambda:self.drag_data(self.selected_files())
+        self.entries_table.setDragEnabled(True);self.entries_table.setAcceptDrops(True);self.entries_table.setDropIndicatorShown(True)
+        self.entries_table.drag_payload=lambda:self.drag_data([self.entries_table.item(i.row(),0).data(ROLE) for i in self.entries_table.selectionModel().selectedRows()],True)
+        self.entries_table.drop_tracks=lambda data,point:self.drop_local(data,point)
+        self.playlist_list.setAcceptDrops(True);self.playlist_list.drop_tracks=lambda data,point:self.drop_local(data,point,True)
+        self.recent_table.setDragEnabled(True);self.recent_table.drag_payload=lambda:self.drag_data([self.recent_table.item(i.row(),0).data(ROLE) for i in self.recent_table.selectionModel().selectedRows()])
+        self.playlist_hover=HoverTabs(self.playlist_tabs)
+        self.rb_panel.setup_dragdrop()
 
     def icon(self,name):
         return outline_icon(name,QColor(self.theme["foreground"]["start"]))
@@ -229,7 +310,7 @@ class Window(QMainWindow):
                 block=QSignalBlocker(slider);slider.setValue(value);del block
 
     def track_thumbnail(self,row):
-        path=row.get("path")
+        path=row.get("path") or row.get("output")
         if row.get("kind")=="file":path=self.catalogue.resolve(row)
         elif not path and row.get("recording_id"):
             file=getattr(self,"_thumbnail_files",{}).get(row["recording_id"])
@@ -237,7 +318,7 @@ class Window(QMainWindow):
         return thumbnail(path,self.icon("music"))
 
     def table(self,columns):
-        table=QTableWidget(0,len(columns))
+        table=TrackTable(0,len(columns))
         table.setHorizontalHeaderLabels(columns)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -247,6 +328,7 @@ class Window(QMainWindow):
         table.setIconSize(QSize(height-8,height-8))
         table.horizontalHeader().setStretchLastSection(True)
         table.setShowGrid(False)
+        table.setWordWrap(False)
         table.setAlternatingRowColors(True)
         table.setItemDelegate(RowDelegate(table,lambda:self.theme))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -275,13 +357,22 @@ class Window(QMainWindow):
             cards.addWidget(card)
         layout.addLayout(cards)
         bar=QHBoxLayout()
+        bar.addStretch()
         for text,action,icon in [("Add music folder",self.add_root,"SP_DirOpenIcon"),("Local Music",lambda:self.navigation.setCurrentRow(2),"SP_DirIcon"),
             ("Playlists",lambda:self.navigation.setCurrentRow(3),"SP_FileDialogListView"),("Setup",lambda:self.navigation.setCurrentRow(4),"settings")]:
-            bar.addWidget(self.button(text,action,icon))
+            button=self.button(text,action,icon);button.setMinimumSize(176,84);button.setIconSize(QSize(30,30));bar.addWidget(button)
         bar.addStretch()
         layout.addLayout(bar)
         self.connection_summary=muted("")
         layout.addWidget(self.connection_summary)
+        layout.addWidget(QLabel("Recently downloaded"))
+        self.recent_table=self.table(["Title","Artist","Downloaded file"])
+        self.recent_table.setMaximumHeight(260)
+        self.recent_table.setColumnWidth(0,360);self.recent_table.setColumnWidth(1,250)
+        self.recent_table.itemDoubleClicked.connect(lambda item:self.play_row(item.data(ROLE)))
+        self.recent_table.customContextMenuRequested.connect(self.recent_context)
+        layout.addWidget(self.recent_table,1)
+        self.recent_empty=muted("Completed downloads will appear here.");layout.addWidget(self.recent_empty)
         layout.addStretch()
 
     def build_downloads(self):
@@ -323,9 +414,11 @@ class Window(QMainWindow):
         self.download_tabs=QTabWidget()
         self.download_tabs.addTab(self.results_table,"Search results")
         actions=QHBoxLayout()
+        self.download_buttons={}
         for text,action,icon in [("Queue selected",self.queue_results,"SP_ArrowDown"),("Start / resume queue",self.start_downloads,"SP_MediaPlay"),
             ("Pause queue",self.pause_downloads,"SP_MediaPause"),("Retry failed",self.retry_downloads,"SP_BrowserReload")]:
-            actions.addWidget(self.button(text,action,icon))
+            button=self.button(text,action,icon);self.download_buttons[text]=button;actions.addWidget(button)
+        self.results_table.itemSelectionChanged.connect(self.update_download_controls)
         actions.addStretch()
         layout.addLayout(actions)
         self.downloads_table=self.table(["Track","Artist","State","Progress","Details"])
@@ -356,7 +449,7 @@ class Window(QMainWindow):
         bar.addWidget(self.duplicates)
         bar.addWidget(self.row_size_control())
         bar.addWidget(self.button("Add folder",self.add_root,"SP_DirOpenIcon"))
-        bar.addWidget(self.button("Add selected to playlist",self.add_selected,"SP_FileDialogListView"))
+        self.add_library_button=self.button("Add selected to playlist",self.add_selected,"SP_FileDialogListView");self.add_library_button.hide();bar.addWidget(self.add_library_button)
         layout.addLayout(bar)
         tree=self.files_table=LibraryTree(lambda:self.theme)
         tree.setHeaderLabels(["Folder / title","Artist","Album","Format","Length","File created","Status","Filename"])
@@ -372,7 +465,7 @@ class Window(QMainWindow):
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tree.customContextMenuRequested.connect(self.files_context)
         tree.itemSelectionChanged.connect(self.file_selection)
-        tree.itemDoubleClicked.connect(lambda item,col:self.show_file_details(item.data(0,ROLE)))
+        tree.itemDoubleClicked.connect(lambda item,col:self.play_row(item.data(0,ROLE)))
         tree.header().setStretchLastSection(True)
         for index,width in enumerate([330,190,200,80,70,165,140]):
             tree.setColumnWidth(index,width)
@@ -402,7 +495,7 @@ class Window(QMainWindow):
         self.playlist_filter.addItems(["All playlists","Local","Spotify linked","Rekordbox linked"])
         self.playlist_filter.currentIndexChanged.connect(self.refresh_playlists)
         left.addWidget(self.playlist_filter)
-        self.playlist_list=QListWidget()
+        self.playlist_list=PlaylistList()
         self.playlist_list.currentItemChanged.connect(self.refresh_entries)
         self.playlist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.playlist_list.customContextMenuRequested.connect(self.playlist_context)
@@ -415,6 +508,7 @@ class Window(QMainWindow):
         right.addWidget(self.playlist_summary)
         self.entries_table=self.table(["#","Title","Artist","Length","Local match"])
         self.entries_table.customContextMenuRequested.connect(self.entries_context)
+        self.entries_table.itemDoubleClicked.connect(lambda item:self.play_row(item.data(ROLE)))
         for index,width in enumerate([45,360,240,80]):
             self.entries_table.setColumnWidth(index,width)
         right.addWidget(self.entries_table,1)
@@ -424,8 +518,8 @@ class Window(QMainWindow):
         self.remove_entry_button=self.button("Remove entry",self.remove_entry,"SP_DialogCancelButton")
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             actions.addWidget(control)
-        actions.addWidget(self.button("Review match…",self.review_match,"SP_FileDialogContentsView"))
-        actions.addWidget(self.button("Queue missing",self.queue_missing,"SP_ArrowDown"))
+        self.review_button=self.button("Review match…",self.review_match,"SP_FileDialogContentsView");actions.addWidget(self.review_button)
+        self.queue_missing_button=self.button("Queue missing",self.queue_missing,"SP_ArrowDown");actions.addWidget(self.queue_missing_button)
         actions.addStretch()
         right.addLayout(actions)
         splitter.addWidget(panel)
@@ -724,6 +818,7 @@ class Window(QMainWindow):
             self.show_error(exc)
 
     def navigate(self,index):
+        self.scan_button.setVisible(index==2)
         self.pages.setCurrentIndex(index)
         self.heading.setText(self.navigation.item(index).text())
 
@@ -860,6 +955,9 @@ class Window(QMainWindow):
         manual=bool(playlist and playlist["source"]=="manual")
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             control.setEnabled(manual)
+            control.setVisible(manual)
+        self.review_button.setVisible(bool(playlist and playlist["source"]=="spotify" and entries))
+        self.queue_missing_button.setVisible(any(e["match_state"]=="missing" for e in entries))
         self.playlist_summary.setText(f"{playlist['name']} · {'Spotify membership and order' if playlist['source']=='spotify' else 'Local playlist'} · Rekordbox: {'linked' if playlist['rekordbox_id'] else 'not linked'}" if playlist else "Select a playlist")
 
     def refresh_live(self):
@@ -867,8 +965,20 @@ class Window(QMainWindow):
         self.refresh_files()
         self.refresh_playlists()
 
+    def update_download_controls(self):
+        if not hasattr(self,"download_buttons"):return
+        jobs=self.catalogue.download_jobs()
+        self.download_buttons["Queue selected"].setVisible(bool(self.results_table.selectionModel().selectedRows()))
+        self.download_buttons["Retry failed"].setVisible(any(j["state"]=="failed" for j in jobs))
+        self.download_buttons["Pause queue"].setVisible(self.download_job is not None)
+        self.download_buttons["Start / resume queue"].setVisible(self.download_job is None and any(j["state"] in {"queued","paused"} for j in jobs))
+
     def refresh_downloads(self):
         jobs=self.catalogue.download_jobs()
+        self.update_download_controls()
+        recent=[j for j in reversed(jobs) if j["state"]=="complete" and j["output"]][:10]
+        self.fill_table(self.recent_table,recent,lambda i,r:[r["title"],r["artist"],Path(r["output"]).name])
+        self.recent_table.setVisible(bool(recent));self.recent_empty.setVisible(not recent)
         self.fill_table(self.downloads_table,jobs,lambda i,row:[row["title"],row["artist"],row["state"].capitalize(),f"{row['progress']:.0f}%",row["message"]])
         for index,row in enumerate(jobs):
             bar=QProgressBar()
@@ -895,6 +1005,7 @@ class Window(QMainWindow):
 
     def file_selection(self):
         rows=self.selected_files()
+        self.add_library_button.setVisible(bool(rows))
         self.details.setText(f"{len(rows)} file(s) selected"+(f" · {self.catalogue.resolve(rows[0])}" if len(rows)==1 else ""))
 
     def show_error(self,error):
@@ -1032,10 +1143,9 @@ class Window(QMainWindow):
             playlists=[p for p in self.catalogue.playlists() if p["source"]=="manual"]
         if not playlists:
             return
-        labels=[f"{p['name']} ({p['id'][:8]})" for p in playlists]
-        label,ok=QInputDialog.getItem(self,"Add to local playlist","Playlist",labels,0,False)
-        if ok:
-            self.catalogue.add_entries(playlists[labels.index(label)]["id"],list(dict.fromkeys(row["recording_id"] for row in rows)))
+        choice=choose_playlist(playlists,self,"Add to local playlist")
+        if choice:
+            self.catalogue.add_entries(choice["id"],list(dict.fromkeys(row["recording_id"] for row in rows)))
             self.refresh_playlists()
 
     def move_entry(self,direction):
@@ -1233,13 +1343,12 @@ class Window(QMainWindow):
     def link_spotify(self):
         def complete(items):
             items=[p for p in items if p]
-            labels=[f"{p['name']} ({p['id'][:8]})" for p in items]
-            if not labels:
+            if not items:
                 self.status.setText("No Spotify playlists available")
                 return
-            label,ok=QInputDialog.getItem(self,"Link Spotify playlist","Choose an owned or collaborative playlist",labels,0,False)
-            if ok:
-                remote_id=items[labels.index(label)]["id"]
+            choice=choose_playlist(items,self,"Link an owned or collaborative Spotify playlist")
+            if choice:
+                remote_id=choice["id"]
                 QTimer.singleShot(100,lambda:self.sync_ids([remote_id]))
         self.start_job("Loading Spotify playlists",lambda progress,cancel:self.spotify.playlists(cancel),complete)
 
@@ -1393,6 +1502,7 @@ class Window(QMainWindow):
         self.download_job.cancelled.connect(self.status.setText)
         self.download_job.finished.connect(self.download_finished)
         self.download_job.start()
+        self.update_download_controls()
 
     def pause_downloads(self):
         if self.download_job:
@@ -1606,6 +1716,7 @@ class Window(QMainWindow):
         row=item.data(0,ROLE)
         menu=QMenu(self)
         if row["kind"]=="file":
+            menu.addAction("Play / preview",lambda:self.play_row(row))
             menu.addAction("File details",lambda:self.show_file_details(row))
             menu.addAction("Show in File Explorer",lambda:self.explorer(self.catalogue.resolve(row)))
             menu.addAction("Add selected to playlist",self.add_selected)
@@ -1651,6 +1762,10 @@ class Window(QMainWindow):
             if not rows:return
             paths=[str(self.catalogue.resolve(r)) for r in rows]
             if QMessageBox.question(self,"Delete music files",f"Move {len(rows)} selected music file(s) to the Recycle Bin?\nPlaylist references will become missing. Rekordbox is unchanged.\n\n"+"\n".join(paths[:12]))!=QMessageBox.StandardButton.Yes:return
+            selected_paths={os.path.normcase(str(self.catalogue.resolve(r))) for r in rows}
+            if (self.player.path and os.path.normcase(self.player.path) in selected_paths) or any(os.path.normcase(j.path) in selected_paths for j in self.player.jobs):
+                if not self.player.shutdown():raise ValueError("Waveform decoding is stopping; retry file removal shortly")
+                self.player.dismiss()
             for row in rows:self.catalogue.remove_file(row["id"],recycle)
             self.refresh()
         except Exception as exc:self.refresh();self.show_error(exc)
@@ -1671,6 +1786,7 @@ class Window(QMainWindow):
         self.entries_table.selectRow(row)
         entry=self.entries_table.item(row,0).data(ROLE)
         menu=QMenu(self)
+        if entry["recording_id"]:menu.addAction("Play / preview",lambda:self.play_row(entry))
         if entry["spotify_id"]:
             menu.addAction("Review local match",self.review_match)
             if entry["match_state"]=="missing":
@@ -1741,5 +1857,7 @@ class Window(QMainWindow):
             self.status.setText("Stopping tasks. Close again once they have finished.")
             event.ignore()
         else:
+            if not self.player.shutdown():
+                self.status.setText("Stopping waveform decoding; close again shortly");event.ignore();return
             self.workspace_lock.unlock()
             event.accept()

@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
     QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication)
 from .rekordbox import Rekordbox
+from .playlist_picker import choose_playlist
 
 ROLE=Qt.ItemDataRole.UserRole
 
@@ -35,14 +36,17 @@ class RekordboxPanel(QWidget):
         self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length"])
         for column,width in enumerate([45,300,210,160,75,100,70]):self.table.setColumnWidth(column,width)
         self.table.customContextMenuRequested.connect(self.track_context)
+        self.table.itemDoubleClicked.connect(lambda item:self.owner.play_row(item.data(ROLE)))
         self.table.setContentsMargins(8,0,0,0)
         split.setHandleWidth(12)
         split.addWidget(self.table);split.setSizes([260,1050]);layout.addWidget(split,1)
         bar=QHBoxLayout()
+        self.track_buttons={}
         for text,fn,icon in [("Edit metadata…",self.edit,"SP_FileDialogDetailedView"),("Add to playlist…",self.add,"SP_ArrowRight"),
                 ("Move up",lambda:self.move(-1),"SP_ArrowUp"),("Move down",lambda:self.move(1),"SP_ArrowDown"),
                 ("Remove entry",self.remove,"SP_DialogCancelButton")]:
-            bar.addWidget(owner.button(text,fn,icon))
+            button=owner.button(text,fn,icon);self.track_buttons[text]=button;bar.addWidget(button)
+        self.table.itemSelectionChanged.connect(self.update_track_controls)
         bar.addStretch();bar.addWidget(owner.row_size_control());layout.addLayout(bar)
         self.summary=QLabel("Connect to Rekordbox in Settings, or refresh to inspect a copy of its library.")
         self.summary.setWordWrap(True);layout.addWidget(self.summary)
@@ -52,6 +56,35 @@ class RekordboxPanel(QWidget):
             bar.addWidget(owner.button(text,fn,icon))
         bar.addStretch();layout.addLayout(bar)
         self.refresh_tree()
+
+    def setup_dragdrop(self):
+        self.table.setDragEnabled(True);self.table.setAcceptDrops(True);self.table.setDropIndicatorShown(True)
+        self.table.drag_payload=lambda:self.owner.drag_data(self.selected(),native=True)
+        self.table.drop_tracks=lambda data,point:self.drop_tracks(data,point)
+        self.tree.setAcceptDrops(True);self.tree.drop_tracks=lambda data,point:self.drop_tracks(data,point,True)
+
+    def drop_tracks(self,data,point,on_tree=False):
+        try:
+            recordings=self.owner.validate_drag(data)
+            item=self.tree.itemAt(point) if on_tree else self.tree.currentItem()
+            id_=item.data(0,ROLE) if item else None
+            playlist=next((p for p in self.data["playlists"] if p["id"]==id_ and p["type"]==0),None)
+            if not playlist:return False
+            if not on_tree and data.get("native_playlist")==id_ and all(data.get("native_songs",[])) and data.get("native_songs"):
+                if self.search.text():raise ValueError("Clear the search before reordering a Rekordbox playlist")
+                existing=[s["id"] for s in playlist["songs"]];moved=[i for i in existing if i in data["native_songs"]]
+                target=self.table.rowAt(point.y());target=target if target>=0 else len(existing)
+                position=len([i for i in existing[:target] if i not in moved]);remaining=[i for i in existing if i not in moved]
+                ordered=remaining[:position]+moved+remaining[position:]
+                self.change("Preparing playlist order",lambda:self.backend.reorder_playlist(id_,ordered))
+            elif data.get("native_tracks"):
+                known={t["id"] for t in self.data["tracks"]}
+                if any(i not in known for i in data["native_tracks"]):raise ValueError("Rekordbox tracks changed; refresh")
+                self.change("Preparing playlist entries",lambda:self.backend.add_tracks(id_,data["native_tracks"]))
+            elif recordings:self.change("Importing tracks into Rekordbox preview",lambda:self.backend.add_recordings(id_,recordings))
+            else:return False
+            return True
+        except Exception as exc:self.owner.show_error(exc);return False
 
     def task(self,label,work):
         self.owner.start_job(label,lambda progress,cancel:work(),self.loaded)
@@ -114,6 +147,7 @@ class RekordboxPanel(QWidget):
         if not self.table.item(row,0).isSelected():self.table.selectRow(row)
         selected=self.selected();menu=QMenu(self)
         if len(selected)==1:
+            menu.addAction("Play / preview",lambda:self.owner.play_row(selected[0]))
             menu.addAction("Edit metadata…",self.edit)
             menu.addAction("Show in File Explorer",lambda:self.owner.explorer(selected[0]["path"]))
             menu.addAction("Copy file path",lambda:QApplication.clipboard().setText(selected[0]["path"]))
@@ -130,6 +164,11 @@ class RekordboxPanel(QWidget):
         query=self.search.text().casefold()
         rows=[r for r in rows if query in " ".join(str(r[k]) for k in ["title","artist","album","genre"]).casefold()]
         self.owner.fill_table(self.table,rows,lambda i,r:[r.get("position",i+1),r["title"],r["artist"],r["genre"],"★"*r["rating"],r["color"],f"{int(r['duration'])//60}:{int(r['duration'])%60:02d}"])
+        self.update_track_controls()
+
+    def update_track_controls(self):
+        rows=self.selected();one=len(rows)==1;membership=bool(one and rows[0].get("song_id"))
+        for label,button in self.track_buttons.items():button.setVisible(one if label=="Edit metadata…" else bool(rows) if label=="Add to playlist…" else membership)
 
     def selected(self):
         return [self.table.item(index.row(),0).data(ROLE) for index in self.table.selectionModel().selectedRows()]
@@ -151,9 +190,8 @@ class RekordboxPanel(QWidget):
         rows=self.selected()
         options=[p for p in self.data["playlists"] if p["type"]==0]
         if not rows or not options:return
-        labels=[f"{p['name']} [{p['id']}]" for p in options]
-        choice,ok=QInputDialog.getItem(self,"Add selected tracks","Playlist",labels,0,False)
-        if ok:self.change("Preparing playlist entries",lambda:self.backend.add_tracks(options[labels.index(choice)]["id"],[r["id"] for r in rows]))
+        choice=choose_playlist(options,self,"Add selected tracks to Rekordbox playlist")
+        if choice:self.change("Preparing playlist entries",lambda:self.backend.add_tracks(choice["id"],[r["id"] for r in rows]))
 
     def move(self,delta):
         rows=self.selected();id_=self.current_playlist()

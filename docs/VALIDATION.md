@@ -1,4 +1,4 @@
-# ZotiBox 0.4 validation
+# ZotiBox validation
 
 Windows 11 x64; Rekordbox 7.2.11. Automated checks cover catalogue/playlist identity,
 Spotify snapshots/PKCE, downloader queue/audio validation, concurrent scanning,
@@ -21,3 +21,8 @@ opened against the altered test copy; test preview/backup workflows before live 
 
 The app bundles Python, Qt, SQLCipher, the pinned downloader and FFmpeg.
 No Python installation is needed to run the Windows release.
+
+Version 0.6 adds checks for searchable playlist selection, drag/drop membership protection and ordering,
+hover navigation, muted player loading/seeking, waveform cancellation, read-only cue markers and
+Rekordbox drag imports that reuse native track identities. Physical audio output and mouse dragging
+remain user checks.
