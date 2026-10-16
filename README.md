@@ -6,6 +6,7 @@ Windows music catalogue, Spotify playlists, Zotify downloads and Rekordbox manag
 
 Download the Windows installer from [Releases](https://github.com/Kit-Leeming/zotibox/releases/latest).
 Install over the existing app folder when updating; uninstalling is unnecessary.
+Launching again restores the existing window. Startup progress appears while the library loads.
 No Python environment or P: drive is required. The default installation is in your Windows user profile.
 The app creates **ZotiBox Database** beside its EXE. Settings → Database can relocate it.
 Settings → Updates checks GitHub and downloads a checksum-verified installer.
@@ -32,9 +33,11 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
   Discovery can run alongside downloads and Spotify tasks. Existing music is never replaced automatically.
 - **Playlists:** create local playlists or link owned/collaborative Spotify playlists.
   Linked membership and order follow Spotify. To update Rekordbox: **Sync selected → Queue missing →
-  Start downloads → Send / resync to Rekordbox → review → Apply**. Export settings and M3U8 are here.
+  Start downloads → Send / resync to Rekordbox → review → Apply**. Missing files are skipped, including
+  when creating an empty playlist; resync after downloads to add them. Export settings and M3U8 are here.
 - **Playlists → Rekordbox:** view the collection/folders, prepare playlists and metadata edits,
-  or preview a ZotiBox playlist sync. Review changes before Apply.
+  or preview a ZotiBox playlist sync. Right-click to rename, export or delete a playlist/folder.
+  Playlist deletion retains collection tracks, cues and music files. Review changes before Apply.
 - Double-click a local track to play. The player includes volume, a seekable waveform and the cue/loop
   points available in the connected Rekordbox database. Cue markers are read-only; this is a preview player.
 - Playlist pickers have search and filters. Spotify does not expose its playlist folder structure through

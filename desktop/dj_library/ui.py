@@ -6,7 +6,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize
+from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize, QPoint
 from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBo
 from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTabs
 from .playlist_picker import choose_playlist
 from .player import MusicPlayer
-from .artwork import thumbnail
+from .artwork_async import ArtworkCache
+from .instance import acquire_lock
 from .file_actions import recycle
 from .catalogue import Catalogue
 from .branding import icon_image, save_icon
@@ -96,13 +97,16 @@ class LibraryTree(DragMixin,QTreeWidget):
 
 class Window(QMainWindow):
     integration_event=Signal(str,object)
-    def __init__(self,workspace,remember=False):
+    def __init__(self,workspace,remember=False,workspace_lock=None,defer_startup=False):
         super().__init__()
         self.remember=remember
-        self.workspace_lock=self.lock_workspace(workspace)
+        self.workspace_lock=workspace_lock or self.lock_workspace(workspace)
         self.catalogue=Catalogue(workspace)
+        self.artwork=ArtworkCache(self);self.artwork.ready.connect(self.artwork_ready)
+        self.artwork_timer=QTimer(self);self.artwork_timer.setSingleShot(True);self.artwork_timer.setInterval(60);self.artwork_timer.timeout.connect(self.load_visible_art)
         self.theme=valid_theme(self.catalogue.get_setting("theme",make_theme()))
         self.job=self.download_job=self.scan_job=None
+        self.close_pending=False
         self.queue_ids=set()
         self.playlist_id=None
         self.setWindowTitle("ZotiBox")
@@ -184,11 +188,12 @@ class Window(QMainWindow):
         self.library_refresh.setInterval(500)
         self.library_refresh.setSingleShot(True)
         self.library_refresh.timeout.connect(self.refresh_files)
-        self.reset_integrations()
+        self.reset_integrations(load_preview=not defer_startup)
         self.apply_theme(self.theme)
         self.set_row_height(self.catalogue.get_setting("row_height",40))
         self.navigation.setCurrentRow(0)
-        self.refresh()
+        if defer_startup:self.status.setText("Loading library…");QTimer.singleShot(50,self.initial_load)
+        else:self.refresh()
 
     def play_row(self,row):
         try:
@@ -309,13 +314,58 @@ class Window(QMainWindow):
             if slider.toolTip()=="Row and cover thumbnail size":
                 block=QSignalBlocker(slider);slider.setValue(value);del block
 
-    def track_thumbnail(self,row):
+    def initial_load(self):
+        try:self.refresh();self.status.setText("Ready")
+        except Exception as exc:self.status.setText("Library loading failed: "+str(exc))
+
+    def thumbnail_path(self,row):
         path=row.get("path") or row.get("output")
-        if row.get("kind")=="file":path=self.catalogue.resolve(row)
-        elif not path and row.get("recording_id"):
-            file=getattr(self,"_thumbnail_files",{}).get(row["recording_id"])
-            if file:path=self.catalogue.resolve(file)
-        return thumbnail(path,self.icon("music"))
+        file=row if row.get("kind")=="file" else getattr(self,"_thumbnail_files",{}).get(row.get("recording_id"))
+        if file:
+            root=getattr(self,"_thumb_bindings",{}).get(file["root_id"])
+            if root:path=Path(root).joinpath(*PurePosixPath(file["relative_path"]).parts)
+        return str(path) if path else None
+
+    def track_thumbnail(self,row):
+        path=self.thumbnail_path(row);icon=self.artwork.get(path) if path else QIcon()
+        return icon if not icon.isNull() else self.icon("music")
+
+    def visible_art_items(self):
+        if self.files_table.isVisible():
+            seen=set()
+            for y in range(0,self.files_table.viewport().height(),max(1,self.files_table.iconSize().height()+8)):
+                item=self.files_table.itemAt(QPoint(5,y))
+                if item and id(item) not in seen:seen.add(id(item));yield item,True
+        for table in self.findChildren(QTableWidget):
+            if not table.isVisible():continue
+            first=table.rowAt(0)
+            if first<0:continue
+            last=table.rowAt(table.viewport().height()-1)
+            if last<0:last=table.rowCount()-1
+            column=1 if table.horizontalHeaderItem(0).text()=="#" else 0
+            for row in range(first,min(last+1,table.rowCount())):
+                item=table.item(row,column)
+                if item:yield item,False
+
+    def load_visible_art(self):
+        for item,tree in self.visible_art_items():
+            path=item.data(0,ROLE+1) if tree else item.data(ROLE+1)
+            if path:
+                icon=self.artwork.get(path)
+                if not icon.isNull():
+                    if tree:item.setIcon(0,icon)
+                    else:item.setIcon(icon)
+                else:self.artwork.request(path)
+
+    def artwork_ready(self,path,image):
+        icon=QIcon(QPixmap.fromImage(image)) if image is not None else QIcon()
+        self.artwork.save(path,icon)
+        if not icon.isNull():
+            for item,tree in self.visible_art_items():
+                key=item.data(0,ROLE+1) if tree else item.data(ROLE+1)
+                if key==path:
+                    if tree:item.setIcon(0,icon)
+                    else:item.setIcon(icon)
 
     def table(self,columns):
         table=TrackTable(0,len(columns))
@@ -332,6 +382,7 @@ class Window(QMainWindow):
         table.setAlternatingRowColors(True)
         table.setItemDelegate(RowDelegate(table,lambda:self.theme))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.verticalScrollBar().valueChanged.connect(lambda *_:self.artwork_timer.start())
         return table
 
     def build_dashboard(self):
@@ -460,6 +511,8 @@ class Window(QMainWindow):
         tree.setUniformRowHeights(True)
         height=self.catalogue.get_setting("row_height",40)
         tree.setIconSize(QSize(height-8,height-8))
+        tree.verticalScrollBar().valueChanged.connect(lambda *_:self.artwork_timer.start())
+        tree.itemExpanded.connect(lambda *_:self.artwork_timer.start())
         tree.setAllColumnsShowFocus(False)
         tree.setItemDelegate(RowDelegate(tree,lambda:self.theme))
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -530,6 +583,7 @@ class Window(QMainWindow):
         right.addWidget(self.row_size_control())
         self.rb_panel=RekordboxPanel(self)
         self.playlist_tabs.addTab(self.rb_panel,"Rekordbox")
+        self.playlist_tabs.currentChanged.connect(self.rb_panel.ensure_loaded)
 
     def build_settings(self):
         layout=self.page()
@@ -821,14 +875,19 @@ class Window(QMainWindow):
         self.scan_button.setVisible(index==2)
         self.pages.setCurrentIndex(index)
         self.heading.setText(self.navigation.item(index).text())
+        self.artwork_timer.start()
+        if index==3:self.rb_panel.ensure_loaded()
 
-    def reset_integrations(self):
+    def reset_integrations(self,load_preview=True):
         self.spotify=Spotify(self.catalogue.get_setting("spotify_client_id",""),TokenStore(self.catalogue.workspace))
         self.engine=DownloadEngine(self.catalogue,self.integration_event.emit)
         self.pending_login=None
         self.rb_panel.backend=Rekordbox(self.catalogue)
-        if self.rb_panel.backend.state:
-            self.rb_panel.loaded(self.rb_panel.backend.view())
+        self.rb_panel.preview_loaded=False
+        if self.rb_panel.backend.load_error:self.rb_panel.summary.setText("Saved preview cannot load: "+self.rb_panel.backend.load_error+". Refresh to reconnect; recovery data is retained.")
+        if load_preview and self.rb_panel.backend.state:
+            try:self.rb_panel.loaded(self.rb_panel.backend.view())
+            except Exception as exc:self.rb_panel.summary.setText("Saved preview could not load: "+str(exc)+". Use Refresh or Discard preview.")
         with self.catalogue.connect() as db:
             db.execute("UPDATE downloads SET state='paused',message='Interrupted session; resume to retry' WHERE state='running'")
 
@@ -855,6 +914,7 @@ class Window(QMainWindow):
         self.connection_summary.setText(f"Spotify: {'login saved' if connected else 'not connected'} · Zotify: {'login saved' if zotify else 'not connected'}")
 
     def refresh_files(self):
+        self._thumb_bindings=self.catalogue.bindings()
         selected_ids={row["id"] for row in self.selected_files()}
         scroll=self.files_table.verticalScrollBar().value()
         expanded=set()
@@ -892,8 +952,9 @@ class Window(QMainWindow):
                     child.setExpanded(key in expanded or bool(self.search.text()))
                     folders[key]=child
                 parent=folders[key]
-            path=self.catalogue.resolve(row)
-            state="Available" if row["available"] and path and path.is_file() else "Missing / unmapped"
+            row["kind"]="file"
+            path=self.thumbnail_path(row)
+            state="Available" if row["available"] and path else "Missing / unmapped"
             if row["copies"]>1:
                 state+=" · duplicate"
             item=LibraryItem([row["title"],row["artist"],row["album"],row["codec"],duration(row["duration"]),date_ns(row["created_ns"]),state,parts[-1]])
@@ -901,6 +962,7 @@ class Window(QMainWindow):
             item.setData(0,ROLE,row)
             item.setToolTip(0,str(path or row["relative_path"]))
             item.setIcon(0,self.track_thumbnail(row))
+            item.setData(0,ROLE+1,self.thumbnail_path(row))
             parent.addChild(item)
             if row["id"] in selected_ids:
                 item.setSelected(True)
@@ -910,6 +972,7 @@ class Window(QMainWindow):
         del block
 
     def fill_table(self,table,rows,values):
+        self._thumb_bindings=self.catalogue.bindings()
         self._thumbnail_files={f["recording_id"]:f for f in self.catalogue.files() if f["available"]}
         block=QSignalBlocker(table)
         table.setRowCount(len(rows))
@@ -921,7 +984,9 @@ class Window(QMainWindow):
                 table.setItem(index,column,item)
                 if column==(1 if table.horizontalHeaderItem(0).text()=="#" else 0):
                     item.setIcon(self.track_thumbnail(row))
+                    item.setData(ROLE+1,self.thumbnail_path(row))
         del block
+        self.artwork_timer.start()
 
     def refresh_playlists(self):
         previous=self.playlist_id
@@ -1076,6 +1141,7 @@ class Window(QMainWindow):
         self.activity.hide()
         self.cancel_button.setVisible(bool(self.scan_job))
         self.refresh()
+        self.maybe_close()
         pending=getattr(self,"pending_installer",None)
         if pending:
             self.pending_installer=None
@@ -1116,9 +1182,11 @@ class Window(QMainWindow):
     def scan_finished(self):
         self.scan_job.deleteLater()
         self.scan_job=None
+        self.artwork.images.clear()
         self.scan_button.setEnabled(True)
         self.cancel_button.setVisible(bool(self.job))
         self.refresh()
+        self.maybe_close()
 
 
     def scan_complete(self,result):
@@ -1138,12 +1206,10 @@ class Window(QMainWindow):
         if not rows:
             return
         playlists=[p for p in self.catalogue.playlists() if p["source"]=="manual"]
-        if not playlists:
-            self.new_playlist()
-            playlists=[p for p in self.catalogue.playlists() if p["source"]=="manual"]
-        if not playlists:
-            return
-        choice=choose_playlist(playlists,self,"Add to local playlist")
+        def create(name):
+            id_=self.catalogue.create_playlist(name)
+            return next(p for p in self.catalogue.playlists() if p["id"]==id_)
+        choice=choose_playlist(playlists,self,"Add to local playlist",create=create)
         if choice:
             self.catalogue.add_entries(choice["id"],list(dict.fromkeys(row["recording_id"] for row in rows)))
             self.refresh_playlists()
@@ -1524,6 +1590,8 @@ class Window(QMainWindow):
         except Exception as exc:
             self.status.setText(f"Playlist export needs attention: {exc}")
 
+        self.maybe_close()
+
     @Slot(str,object)
     def handle_integration_event(self,kind,value):
         if kind=="auth_url":
@@ -1635,13 +1703,7 @@ class Window(QMainWindow):
             self.show_error(exc)
 
     @staticmethod
-    def lock_workspace(path):
-        path=Path(path).resolve()
-        path.mkdir(parents=True,exist_ok=True)
-        lock=QLockFile(str(path/".application.lock"))
-        if not lock.tryLock(0):
-            raise ValueError("This ZotiBox Database is already open in another window")
-        return lock
+    def lock_workspace(path):return acquire_lock(path)
 
     def switch_workspace(self,path):
         if Path(path).resolve()==self.catalogue.workspace:
@@ -1654,6 +1716,7 @@ class Window(QMainWindow):
             raise
         self.workspace_lock.unlock()
         self.workspace_lock,self.catalogue=lock,catalogue
+        if getattr(self,"instance",None):self.instance.rebind(path,lock)
         self.reset_integrations()
         self.client_edit.setText(catalogue.get_setting("spotify_client_id",""))
         self.download_folder.setText(catalogue.get_setting("download_folder",str(catalogue.workspace/"Music")))
@@ -1850,14 +1913,20 @@ class Window(QMainWindow):
             self.native_frame_configured=True
             configure_frame(self)
 
+    def maybe_close(self):
+        if self.close_pending and not (self.job or self.download_job or self.scan_job):QTimer.singleShot(0,self.close)
+
     def closeEvent(self,event):
         if self.job or self.download_job or self.scan_job:
+            self.close_pending=True
             self.cancel_task()
             self.pause_downloads()
-            self.status.setText("Stopping tasks. Close again once they have finished.")
+            self.status.setText("Stopping tasks; ZotiBox will close when they finish.")
             event.ignore()
         else:
             if not self.player.shutdown():
-                self.status.setText("Stopping waveform decoding; close again shortly");event.ignore();return
+                self.status.setText("Stopping waveform decoding…");QTimer.singleShot(250,self.close);event.ignore();return
+            self.artwork.close()
+            if getattr(self,"instance",None):self.instance.close()
             self.workspace_lock.unlock()
             event.accept()

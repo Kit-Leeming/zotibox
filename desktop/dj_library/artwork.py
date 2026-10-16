@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QIcon, QPixmap
 
 @lru_cache(maxsize=256)
-def cover(path, size, modified):
+def cover(path, size, modified, as_image=False):
     try:
         audio = File(path)
         data = None
@@ -25,10 +25,11 @@ def cover(path, size, modified):
         if data and len(data) <= 8 * 1024 * 1024:
             image = QImage.fromData(data)
             if not image.isNull():
-                return QIcon(QPixmap.fromImage(image.scaled(96,96,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)))
+                scaled=image.scaled(96,96,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
+                return scaled if as_image else QIcon(QPixmap.fromImage(scaled))
     except Exception:
         pass
-    return QIcon()
+    return None if as_image else QIcon()
 
 def thumbnail(path, fallback):
     if path:

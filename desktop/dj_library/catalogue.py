@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -35,9 +36,15 @@ def file_hash(path: Path, cancel=None):
 
 
 def atomic_json(path, value):
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    temporary = path.with_name(path.name+"."+uuid.uuid4().hex+".tmp")
+    try:
+        temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        for attempt in range(5):
+            try:temporary.replace(path);break
+            except PermissionError:
+                if attempt==4:raise
+                time.sleep(.025*(attempt+1))
+    finally:temporary.unlink(missing_ok=True)
 
 
 def safe_relative(value):

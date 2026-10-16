@@ -1,8 +1,9 @@
 """Rekordbox collection and playlist preview inside the Playlists page."""
 from pathlib import Path
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
     QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication)
+from PySide6.QtGui import QAction,QKeySequence
 from .rekordbox import Rekordbox
 from .playlist_picker import choose_playlist
 
@@ -14,12 +15,13 @@ class RekordboxPanel(QWidget):
         super().__init__()
         self.owner=owner
         self.backend=Rekordbox(owner.catalogue)
+        self.preview_loaded=False
         self.data={"tracks":[],"playlists":[],"colors":[],"changes":[]}
         layout=QVBoxLayout(self);layout.setContentsMargins(0,12,0,0)
-        bar=QHBoxLayout()
+        bar=QHBoxLayout();self.tree_buttons={}
         for text,fn,icon in [("Refresh Rekordbox",self.connect,"SP_BrowserReload"),("New playlist",lambda:self.create(False),"SP_FileIcon"),
-                ("New folder",lambda:self.create(True),"SP_DirIcon"),("Rename",self.rename,"SP_FileDialogDetailedView")]:
-            bar.addWidget(owner.button(text,fn,icon))
+                ("New folder",lambda:self.create(True),"SP_DirIcon"),("Rename",self.rename,"SP_FileDialogDetailedView"),("Delete…",self.delete,"SP_DialogCancelButton")]:
+            button=owner.button(text,fn,icon);self.tree_buttons[text]=button;bar.addWidget(button)
         bar.addStretch();layout.addLayout(bar)
         self.search=owner.search_bar("Search Rekordbox collection or selected playlist")
         self.search.textChanged.connect(self.refresh_tracks);layout.addWidget(self.search)
@@ -32,6 +34,8 @@ class RekordboxPanel(QWidget):
         self.tree.customContextMenuRequested.connect(self.tree_context)
         self.tree.itemExpanded.connect(self.save_expansion);self.tree.itemCollapsed.connect(self.save_expansion)
         self.tree.currentItemChanged.connect(self.refresh_tracks)
+        for key,fn in [("Delete",self.delete),("F2",self.rename)]:
+            action=QAction(self.tree);action.setShortcut(QKeySequence(key));action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut);action.triggered.connect(fn);self.tree.addAction(action)
         split.addWidget(self.tree)
         self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length"])
         for column,width in enumerate([45,300,210,160,75,100,70]):self.table.setColumnWidth(column,width)
@@ -89,7 +93,15 @@ class RekordboxPanel(QWidget):
     def task(self,label,work):
         self.owner.start_job(label,lambda progress,cancel:work(),self.loaded)
 
+    def ensure_loaded(self,*_):
+        self.owner.artwork_timer.start()
+        if not self.isVisible() or self.preview_loaded or not self.backend.state:return
+        if self.owner.job:QTimer.singleShot(200,self.ensure_loaded);return
+        self.preview_loaded=True
+        self.task("Loading saved Rekordbox preview",self.backend.view)
+
     def loaded(self,data):
+        self.preview_loaded=True
         self.data=data;self.refresh_tree()
         self.owner.status.setText("Rekordbox preview updated; live library is unchanged")
 
@@ -97,7 +109,11 @@ class RekordboxPanel(QWidget):
         self.task("Reading Rekordbox",self.backend.connect)
 
     def change(self,label,work):
-        def run():work();return self.backend.view()
+        def run():
+            if not self.backend.state:self.backend.connect()
+            selected=work();view=self.backend.view()
+            if isinstance(selected,str):view["_selection"]=selected
+            return view
         self.task(label,run)
 
     def current_playlist(self):
@@ -105,7 +121,8 @@ class RekordboxPanel(QWidget):
         return item.data(0,ROLE) if item else None
 
     def refresh_tree(self):
-        previous=self.current_playlist()
+        reveal=self.data.get("_selection") is not None
+        previous=self.data.pop("_selection",None) or self.current_playlist()
         self.tree.blockSignals(True);self.tree.clear()
         collection=QTreeWidgetItem(["Collection"]);collection.setData(0,ROLE,None)
         collection.setIcon(0,self.owner.icon("SP_FileDialogContentsView"));self.tree.addTopLevelItem(collection)
@@ -119,10 +136,15 @@ class RekordboxPanel(QWidget):
             else:self.tree.addTopLevelItem(items[p["id"]])
         expanded=set(self.owner.catalogue.get_setting("rekordbox_expanded",[]))
         for id_,item in items.items():item.setExpanded(id_ in expanded)
-        self.tree.setCurrentItem(items.get(previous,collection));self.tree.blockSignals(False)
+        chosen=items.get(previous,collection);self.tree.setCurrentItem(chosen)
+        if reveal:
+            parent=chosen.parent()
+            while parent:parent.setExpanded(True);parent=parent.parent()
+        self.tree.blockSignals(False)
         self.refresh_tracks()
         n=len(self.data["changes"])
-        self.summary.setText(f"{len(self.data['tracks'])} tracks · {n} pending change(s). Changes affect only the preview until Apply.")
+        skipped=sum(len(rows) for rows in (self.backend.state or {}).get("skipped_tracks",{}).values())
+        self.summary.setText(f"{len(self.data['tracks'])} tracks · {n} pending change(s). Changes affect only the preview until Apply."+(f" {skipped} missing track(s) skipped; download/match and resync to add them." if skipped else ""))
 
     def save_expansion(self,*_):
         expanded=[]
@@ -137,7 +159,11 @@ class RekordboxPanel(QWidget):
         if not item:return
         self.tree.setCurrentItem(item);menu=QMenu(self)
         menu.addAction("New playlist…",lambda:self.create(False));menu.addAction("New folder…",lambda:self.create(True))
-        if self.current_playlist():menu.addAction("Rename…",self.rename)
+        if self.current_playlist():
+            menu.addAction("Rename…",self.rename)
+            menu.addAction("Delete playlist / folder…",self.delete)
+            playlist=next((p for p in self.data["playlists"] if p["id"]==self.current_playlist()),None)
+            if playlist and playlist["type"]==0:menu.addAction("Export M3U8…",self.export_playlist)
         menu.addAction("Collapse all folders",self.tree.collapseAll)
         menu.exec(self.tree.viewport().mapToGlobal(point))
 
@@ -154,10 +180,12 @@ class RekordboxPanel(QWidget):
         menu.addAction("Add to playlist…",self.add)
         if len(selected)==1 and selected[0].get("song_id"):
             menu.addAction("Move up",lambda:self.move(-1));menu.addAction("Move down",lambda:self.move(1))
-            menu.addAction("Remove from playlist",self.remove)
+        if selected and all(r.get("song_id") for r in selected):menu.addAction("Remove from playlist",self.remove)
         menu.exec(self.table.viewport().mapToGlobal(point))
 
     def refresh_tracks(self,*_):
+        current=next((p for p in self.data["playlists"] if p["id"]==self.current_playlist()),None)
+        for label in ["Rename","Delete…"]:self.tree_buttons[label].setEnabled(bool(current and current["type"] in {0,1}))
         id_=self.current_playlist();tracks={t["id"]:t for t in self.data["tracks"]}
         playlist=next((p for p in self.data["playlists"] if p["id"]==id_),None)
         rows=[dict(tracks[s["track_id"]],song_id=s["id"],position=s["position"]) for s in playlist["songs"] if s["track_id"] in tracks] if playlist else list(tracks.values()) if id_ is None else []
@@ -167,31 +195,70 @@ class RekordboxPanel(QWidget):
         self.update_track_controls()
 
     def update_track_controls(self):
-        rows=self.selected();one=len(rows)==1;membership=bool(one and rows[0].get("song_id"))
-        for label,button in self.track_buttons.items():button.setVisible(one if label=="Edit metadata…" else bool(rows) if label=="Add to playlist…" else membership)
+        rows=self.selected();one=len(rows)==1;membership=bool(rows and all(r.get("song_id") for r in rows))
+        for label,button in self.track_buttons.items():button.setVisible(one if label=="Edit metadata…" else bool(rows) if label=="Add to playlist…" else membership and (one or label=="Remove entry"))
 
     def selected(self):
         return [self.table.item(index.row(),0).data(ROLE) for index in self.table.selectionModel().selectedRows()]
 
     def create(self,folder):
+        if self.owner.job:self.owner.status.setText("Wait for the current task before creating a playlist");return
         name,ok=QInputDialog.getText(self,"New Rekordbox folder" if folder else "New Rekordbox playlist","Name")
         if ok:
             current=self.current_playlist()
-            parent=next((p["id"] for p in self.data["playlists"] if p["id"]==current and p["type"]==1),None)
+            selected=next((p for p in self.data["playlists"] if p["id"]==current),None)
+            parent=(selected["id"] if selected["type"]==1 else selected["parent"]) if selected else None
+            if parent in {"root","100000","200000"}:parent=None
             self.change("Preparing playlist",lambda:self.backend.create_playlist(name,parent,folder))
 
     def rename(self):
+        if self.owner.job:self.owner.status.setText("Wait for the current task before renaming");return
         id_=self.current_playlist()
         if not id_:return
-        name,ok=QInputDialog.getText(self,"Rename playlist/folder","Name")
+        row=next(p for p in self.data["playlists"] if p["id"]==id_)
+        name,ok=QInputDialog.getText(self,"Rename playlist/folder","Name",text=row["name"])
         if ok:self.change("Preparing rename",lambda:self.backend.rename_playlist(id_,name))
 
+    def delete(self):
+        if self.owner.job:self.owner.status.setText("Wait for the current task before deleting a playlist");return
+        id_=self.current_playlist();playlist=next((p for p in self.data["playlists"] if p["id"]==id_),None)
+        if not playlist or playlist["type"] not in {0,1}:return
+        suffix=" and all playlists inside it" if playlist["type"]==1 else ""
+        if QMessageBox.question(self,"Delete Rekordbox playlist / folder",f"Prepare deletion of ‘{playlist['name']}’{suffix}?\nTracks, music files and cues are retained. Review and Apply to change Rekordbox.")!=QMessageBox.StandardButton.Yes:return
+        parent=playlist["parent"]
+        def work():self.backend.delete_playlist(id_);return parent
+        self.change("Preparing playlist deletion",work)
+
+    def export_playlist(self):
+        id_=self.current_playlist();playlist=next((p for p in self.data["playlists"] if p["id"]==id_ and p["type"]==0),None)
+        if not playlist:return
+        path,_=QFileDialog.getSaveFileName(self,"Export Rekordbox playlist","playlist.m3u8","M3U8 playlist (*.m3u8)")
+        if not path:return
+        try:
+            if Path(path).suffix.casefold()!=".m3u8":path+=".m3u8"
+            tracks={t["id"]:t for t in self.data["tracks"]};lines=["#EXTM3U"];missing=0
+            for song in playlist["songs"]:
+                track=tracks[song["track_id"]];file=Path(track["path"])
+                if not file.is_file():missing+=1;continue
+                label=(track["artist"]+" - "+track["title"]).replace("\n"," ").replace("\r"," ")
+                lines.extend([f"#EXTINF:{int(track['duration'])},{label}",str(file.absolute())])
+            Path(path).write_text("\n".join(lines)+"\n",encoding="utf-8")
+            self.owner.status.setText(f"Exported playlist; {missing} missing file(s) skipped")
+        except Exception as exc:self.owner.show_error(exc)
+
     def add(self):
+        if self.owner.job:self.owner.status.setText("Wait for the current task before editing playlists");return
         rows=self.selected()
         options=[p for p in self.data["playlists"] if p["type"]==0]
-        if not rows or not options:return
-        choice=choose_playlist(options,self,"Add selected tracks to Rekordbox playlist")
-        if choice:self.change("Preparing playlist entries",lambda:self.backend.add_tracks(choice["id"],[r["id"] for r in rows]))
+        if not rows:return
+        def create(name):
+            if not self.backend.state:self.backend.connect()
+            id_=self.backend.create_playlist(name);return next(p for p in self.backend.view()["playlists"] if p["id"]==id_)
+        choice=choose_playlist(options,self,"Add selected tracks to Rekordbox playlist",create=create)
+        if choice:
+            def work():self.backend.add_tracks(choice["id"],[r["id"] for r in rows]);return choice["id"]
+            self.change("Preparing playlist entries",work)
+        elif self.backend.state:self.loaded(self.backend.view())
 
     def move(self,delta):
         rows=self.selected();id_=self.current_playlist()
@@ -202,8 +269,8 @@ class RekordboxPanel(QWidget):
 
     def remove(self):
         rows=self.selected();id_=self.current_playlist()
-        if len(rows)==1 and id_ and rows[0].get("song_id"):
-            self.change("Preparing removal",lambda:self.backend.remove_song(id_,rows[0]["song_id"]))
+        if rows and id_ and all(r.get("song_id") for r in rows):
+            self.change("Preparing removal",lambda:self.backend.remove_songs(id_,[r["song_id"] for r in rows]))
 
     def edit(self):
         rows=self.selected()
@@ -225,7 +292,10 @@ class RekordboxPanel(QWidget):
             self.change("Preparing metadata",lambda:self.backend.edit_track(row["id"],values))
 
     def preview(self):
-        QMessageBox.information(self,"Pending Rekordbox changes","\n".join(self.backend.state["changes"]) if self.backend.state and self.backend.state["changes"] else "No pending changes")
+        lines=list((self.backend.state or {}).get("changes",[]))
+        for rows in (self.backend.state or {}).get("skipped_tracks",{}).values():
+            if rows:lines.extend(["",f"Skipped {len(rows)} missing track(s):"]+[f"{r['artist']} — {r['title']}" for r in rows[:30]])
+        QMessageBox.information(self,"Pending Rekordbox changes","\n".join(lines) if lines else "No pending changes")
 
     def apply(self):
         try:
@@ -250,13 +320,9 @@ class RekordboxPanel(QWidget):
         id_=self.owner.playlist_id
         if not id_:return
         playlist=next(p for p in self.owner.catalogue.playlists() if p["id"]==id_)
-        missing=[e for e in self.owner.catalogue.entries(id_) if not e["recording_id"] or not self.owner.catalogue.available_recording(e["recording_id"])]
-        if missing:
-            QMessageBox.information(self,"Tracks needed before Rekordbox sync",f"{len(missing)} track(s) need a local file. Use Queue missing to download them, or Review match to connect existing files, then send this playlist again.")
-            return
         def work():
             if not self.backend.state:self.backend.connect()
-            self.backend.sync_local(id_,playlist["rekordbox_id"])
-            return self.backend.view()
+            target=self.backend.sync_local(id_,playlist["rekordbox_id"])
+            view=self.backend.view();view["_selection"]=target;return view
         self.owner.playlist_tabs.setCurrentIndex(1)
         self.task("Preparing Rekordbox sync preview",work)

@@ -98,7 +98,13 @@ class Rekordbox:
         self.root=catalogue.workspace/".local"/"rekordbox"
         self.root.mkdir(parents=True,exist_ok=True)
         self.state_path=self.root/"pending.json"
-        self.state=json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else None
+        self.state=None;self.load_error=None
+        try:
+            if self.state_path.exists():
+                state=json.loads(self.state_path.read_text(encoding="utf-8"))
+                if not isinstance(state,dict) or not {"session","source","fingerprint","changes","links"}<=state.keys():raise ValueError("Invalid saved preview")
+                self.state=state
+        except (OSError,ValueError,TypeError) as exc:self.load_error=str(exc)
 
     @property
     def source(self):
@@ -118,6 +124,8 @@ class Rekordbox:
             if self.state and self.state["changes"]:
                 raise ValueError("Apply or discard the pending Rekordbox changes before refreshing")
             source=self.source
+            if self.load_error and self.state_path.exists():
+                shutil.copy2(self.state_path,self.root/("pending-recovery-"+uuid.uuid4().hex+".json"));self.load_error=None
             if source.name.lower()!="master.db" or not source.is_file():
                 raise ValueError("Select the existing Rekordbox master.db file")
             session=str(uuid.uuid4())
@@ -204,6 +212,22 @@ class Rekordbox:
         if not name.strip():raise ValueError("Enter a name")
         return self.stage(f"Rename playlist/folder to {name}",lambda db:db.rename_playlist(self.playlist(db,id_),name.strip()))
 
+    def delete_playlist(self,id_):
+        view=self.view();items={p["id"]:p for p in view["playlists"]}
+        if id_ not in items or items[id_]["type"] not in {0,1}:raise ValueError("Select a regular playlist or folder")
+        deleted={id_}
+        while True:
+            children={p["id"] for p in items.values() if p["parent"] in deleted}
+            if children<=deleted:break
+            deleted|=children
+        if deleted&SPECIAL:raise ValueError("System playlists cannot be deleted")
+        self.stage(f"Delete {'folder and descendants' if items[id_]['type']==1 else 'playlist'}: {items[id_]['name']}",lambda db:db.delete_playlist(self.playlist(db,id_)))
+        self.state.setdefault("deleted_playlists",[]).extend(sorted(deleted))
+        for local,target in list(self.state["links"].items()):
+            if target in deleted:
+                del self.state["links"][local];self.state.get("local_snapshots",{}).pop(local,None)
+        self.save()
+
     def add_tracks(self,id_,tracks):
         def operation(db):
             playlist=self.playlist(db,id_,True)
@@ -215,6 +239,14 @@ class Rekordbox:
 
     def remove_song(self,playlist_id,song_id):
         return self.stage("Remove playlist entry",lambda db:db.remove_from_playlist(self.playlist(db,playlist_id,True),song_id))
+
+    def remove_songs(self,playlist_id,song_ids):
+        def operation(db):
+            playlist=self.playlist(db,playlist_id,True)
+            existing={song.ID for song in playlist.Songs}
+            if not set(song_ids)<=existing:raise ValueError("Playlist changed; refresh before removing entries")
+            for id_ in dict.fromkeys(song_ids):db.remove_from_playlist(playlist,id_)
+        return self.stage(f"Remove {len(song_ids)} playlist entries",operation)
 
     def move_song(self,playlist_id,song_id,position):
         return self.stage(f"Move playlist entry to position {position}",lambda db:db.move_song_in_playlist(self.playlist(db,playlist_id,True),song_id,position))
@@ -242,15 +274,17 @@ class Rekordbox:
         local=next(p for p in self.catalogue.playlists() if p["id"]==playlist_id)
         target=target or (self.state or {}).get("links",{}).get(playlist_id) or local["rekordbox_id"]
         entries=self.catalogue.entries(playlist_id)
-        native_paths={os.path.normcase(os.path.normpath(t["path"])) for t in self.view()["tracks"]}
-        paths=[]
+        view=self.view()
+        if target and not any(p["id"]==target for p in view["playlists"]):target=None
+        native_paths={os.path.normcase(os.path.normpath(t["path"])) for t in view["tracks"]}
+        files=self.catalogue.files();paths=[];skipped=[]
         for entry in entries:
-            choices=[row for row in self.catalogue.files() if row["recording_id"]==entry["recording_id"] and row["available"]
+            choices=[row for row in files if row["recording_id"]==entry["recording_id"] and row["available"]
                       and (path:=self.catalogue.resolve(row)) and path.is_file()] if entry["recording_id"] else []
             choices.sort(key=lambda row:os.path.normcase(os.path.normpath(str(self.catalogue.resolve(row)))) not in native_paths)
             row=choices[0] if choices else None
             path=self.catalogue.resolve(row) if row else None
-            if not path or not path.is_file():raise ValueError("Resolve every missing local track before synchronising this playlist")
+            if not path or not path.is_file():skipped.append(entry);continue
             paths.append((path,row))
         def operation(db):
             from pyrekordbox.db6 import tables
@@ -278,10 +312,12 @@ class Rekordbox:
                 for song in queue:db.remove_from_playlist(playlist,song)
             for index,song in enumerate(ordered,1):db.move_song_in_playlist(playlist,song,index)
             return playlist.ID
-        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} entries)",operation)
+        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped)",operation)
         self.state.setdefault("local_snapshots",{})[playlist_id]={"name":local["name"],"entries":entries,
             "files":[{"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths]}
-        self.state["links"][playlist_id]=result;self.save()
+        self.state["links"][playlist_id]=result
+        self.state.setdefault("skipped_tracks",{})[playlist_id]=[{"title":e["title"],"artist":e["artist"],"spotify_id":e["spotify_id"]} for e in skipped]
+        self.save()
         return result
 
     def reorder_playlist(self,id_,song_ids):
@@ -455,6 +491,7 @@ class Rekordbox:
                     else:target.write_bytes(data)
                 raise
             with self.catalogue.connect() as db:
+                for id_ in self.state.get("deleted_playlists",[]):db.execute("UPDATE playlists SET rekordbox_id=NULL WHERE rekordbox_id=?",(id_,))
                 for local,target in self.state["links"].items():db.execute("UPDATE playlists SET rekordbox_id=? WHERE id=?",(target,local))
             self.state["changes"]=[];self.connect()
             return f"Applied Rekordbox changes; backup: {backup.name}"
