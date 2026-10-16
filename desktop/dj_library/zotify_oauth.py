@@ -1,6 +1,7 @@
 """Loopback lifecycle adapter for the fork's OAuth/token implementation."""
 import secrets
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -19,6 +20,21 @@ class LoopbackOAuth(OAuth):
         self.emit = emit
         self.login_timeout = timeout
 
+    def refresh_token(self):
+        if not self._OAuth__refresh_token or not self.has_token():
+            raise LoginError('Saved Spotify authorization is incomplete. Start a fresh Zotify login in Settings → Downloads.')
+        if self._OAuth__token_expires_at>datetime.now():return self
+        try:
+            response=requests.post('https://accounts.spotify.com/api/token',data={'grant_type':'refresh_token',
+                'client_id':self._OAuth__client_id,'refresh_token':self._OAuth__refresh_token},timeout=30)
+        except requests.RequestException as exc:
+            raise LoginError('Could not reach Spotify to renew Zotify login. Check your connection and reconnect.') from exc
+        if response.status_code!=200:
+            raise LoginError(f'Spotify could not renew Zotify login (HTTP {response.status_code}). Start a fresh login in Settings → Downloads.')
+        data=response.json()
+        if not data.get('access_token'):raise LoginError('Spotify returned an incomplete login. Reconnect Zotify.')
+        return self.ingest_token_response(data)
+
     def request_token(self):
         try:
             response = requests.post("https://accounts.spotify.com/api/token", data={
@@ -29,7 +45,10 @@ class LoopbackOAuth(OAuth):
             raise LoginError("Could not reach Spotify to finish Zotify login. Check your connection and reconnect in Setup.") from exc
         if response.status_code != 200:
             raise LoginError(f"Spotify rejected the Zotify login (HTTP {response.status_code}). Start a fresh login in Setup.")
-        return self.ingest_token_response(response.json())
+        data=response.json()
+        if not data.get('access_token') or not data.get('refresh_token'):
+            raise LoginError('Spotify returned an incomplete authorization. Start a fresh Zotify login.')
+        return self.ingest_token_response(data)
 
     def flow(self):
         target = urlsplit(self.redirect)

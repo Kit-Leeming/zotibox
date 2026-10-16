@@ -36,3 +36,24 @@ Checked against [Mixxx library interactions](https://manual.mixxx.org/2.5/en/cha
 and [pyrekordbox playlist API](https://pyrekordbox.readthedocs.io/en/latest/generated/pyrekordbox.masterdb.database.html).
 REA/native mouse interaction is not available in this task; automated widget events and disposable
 databases cover these flows, with physical drag testing left for the installed build.
+
+## 0.9 follow-up
+
+- An isolated copy of the saved login reproduced incomplete developer OAuth credentials: the stream
+  session was valid, but the fork retained a failed OAuth object and falsely considered login complete.
+  Assign OAuth only after token validation; request browser authorization after failed saved login.
+  Refresh calls have timeouts, preserve omitted replacement refresh tokens, and report safe errors.
+  Production credentials and the live music catalogue were not changed during diagnosis.
+- Startup update checks run outside the main task queue, remain quiet on network failure and prompt
+  only for a newer release. Installation remains explicit; Later is the default choice.
+- Queue missing covers distinct playable missing tracks across all playlists, excludes active queue
+  entries, hides when empty and retains the current page. Global Rekordbox sync prepares a checked
+  batch for review; changing tabs cannot swallow the sync behind deferred preview loading.
+- Ordinary candidates below 80% no longer force review. ISRC/exact identity conflicts remain reviewable;
+  confirmed decisions persist. Existing unresolved entries are reclassified once on normal startup.
+- Pasted Spotify playlist URLs offer a new link or a resync, with browsing and cancel alternatives.
+  Remaining audio uses hh:mm:ss; finish estimates use local hh:mm and are hidden while paused.
+- Sidebar collapse preserves icons, tooltips and page headings. Public screenshots use generated demo data.
+
+Token handling follows [Spotify's PKCE guidance](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+and [refresh-token guidance](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens).

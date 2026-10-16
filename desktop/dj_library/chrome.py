@@ -22,6 +22,8 @@ class TitleBar(QWidget):
         super().__init__();self.window=window
         self.setFixedHeight(40);self.setObjectName("titlebar")
         row=QHBoxLayout(self);row.setContentsMargins(18,0,0,0);row.setSpacing(0)
+        self.menu_button=QPushButton('☰');self.menu_button.setFixedSize(40,40);self.menu_button.setObjectName('windowcontrol')
+        self.menu_button.setAccessibleName('Toggle navigation');self.menu_button.clicked.connect(window.toggle_sidebar);row.addWidget(self.menu_button)
         label=QLabel("ZotiBox");label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         row.addWidget(label);row.addStretch()
         for text,tip,callback in [("−","Minimise",window.showMinimized),("□","Maximise / restore",self.toggle),("×","Close",window.close)]:

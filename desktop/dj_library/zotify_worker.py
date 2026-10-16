@@ -50,6 +50,8 @@ def main(arguments):
             redirect = f"http://127.0.0.1:4381/login"
             return WorkerOAuth(client_id, redirect, emit).set_scopes(SCOPES)
         LoginHandler.create_oauth = staticmethod(create_oauth)
+        from .zotify_login import install_login_adapter,failure_message
+        install_login_adapter(LoginHandler,Zotify,create_oauth,emit)
         def login(cls, arguments):
             emit("status", message="Connecting to Zotify; checking saved login")
             cls.attempt_login(arguments)
@@ -106,6 +108,8 @@ def main(arguments):
         return 0
     except (Exception, SystemExit) as exc:
         # Avoid forwarding upstream token/credential exception text.
-        message = str(exc) if type(exc).__name__ == "LoginError" else f"Zotify request failed ({type(exc).__name__}). Check login, Spotify access, and format/quality."
-        emit("error", message=message)
+        from .zotify_login import failure_message
+        import traceback
+        frames=[{'file':frame.filename.replace('\\','/').split('/')[-1],'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(exc.__traceback__)[-8:]]
+        emit("error", message=failure_message(exc),diagnostic={'type':type(exc).__name__,'frames':frames})
         return 1

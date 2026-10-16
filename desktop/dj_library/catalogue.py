@@ -512,6 +512,13 @@ class Catalogue:
             db.execute("INSERT INTO downloads(id,spotify_id,created) VALUES (?,?,?)", (job_id, spotify_id, now()))
             return job_id
 
+    def missing_tracks(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT DISTINCT t.* FROM remote_tracks t JOIN entries e ON e.spotify_id=t.id
+                WHERE e.match_state='missing' AND t.playable=1 AND NOT EXISTS
+                (SELECT 1 FROM downloads d WHERE d.spotify_id=t.id AND d.state IN ('queued','running','paused'))
+                ORDER BY t.artist,t.title""")]
+
     def download_jobs(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT d.*,t.title,t.artist,t.duration FROM downloads d JOIN remote_tracks t ON t.id=d.spotify_id ORDER BY d.created,d.id")]

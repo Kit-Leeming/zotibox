@@ -93,6 +93,7 @@ def main():
     else:
         QSettings().setValue("database",str(window.catalogue.workspace))
         window.showMaximized()
+        QTimer.singleShot(1000,window.schedule_startup_checks)
         if splash:splash.finish(window)
         app.processEvents()
         log_startup(f"Main window visible after {time.monotonic()-started:.2f}s")

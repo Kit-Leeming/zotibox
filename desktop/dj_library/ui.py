@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime,timedelta
 from pathlib import Path, PurePosixPath
 from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize, QPoint
 from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen
@@ -23,8 +23,8 @@ from .catalogue import Catalogue
 from .branding import icon_image, save_icon
 from .themes import make_theme, valid_theme, stylesheet, RowDelegate, ThemeDialog, selection_brush
 from .icons import icon as outline_icon
-from .spotify import Spotify, TokenStore, REDIRECT_URI, track_data
-from .matching import match_track, candidates
+from .spotify import Spotify, TokenStore, REDIRECT_URI, track_data,spotify_id
+from .matching import match_track,local_recordings,reclassify_reviews
 from .downloads import DownloadEngine, schema, MANAGED, validated_options, worker_config
 from .transfer import export_workspace, import_workspace, inspect_package
 from .workspace import relocate
@@ -46,6 +46,11 @@ def muted(text):
 def duration(value):
     minutes,seconds=divmod(int(value or 0),60)
     return f"{minutes}:{seconds:02d}"
+
+
+def clock_duration(value):
+    hours,remainder=divmod(max(0,int(value or 0)),3600);minutes,seconds=divmod(remainder,60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 def date_ns(value):
     return datetime.fromtimestamp(value/1e9).strftime("%Y-%m-%d %H:%M") if value else ""
@@ -108,6 +113,7 @@ class Window(QMainWindow):
         self.artwork_timer=QTimer(self);self.artwork_timer.setSingleShot(True);self.artwork_timer.setInterval(60);self.artwork_timer.timeout.connect(self.load_visible_art)
         self.theme=valid_theme(self.catalogue.get_setting("theme",make_theme()))
         self.job=self.download_job=self.scan_job=None
+        self.update_check_job=None
         self.close_pending=False
         self.queue_ids=set()
         self.playlist_id=None
@@ -127,20 +133,23 @@ class Window(QMainWindow):
         row=QHBoxLayout(body)
         row.setContentsMargins(0,0,0,0)
         row.setSpacing(0)
-        sidebar=QFrame()
+        sidebar=self.sidebar=QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(198)
-        side=QVBoxLayout(sidebar)
+        side=self.sidebar_layout=QVBoxLayout(sidebar)
         side.setContentsMargins(18,28,18,20)
-        brand=QLabel("ZotiBox")
+        brand=self.sidebar_brand=QLabel("ZotiBox")
         brand.setObjectName("brand")
         side.addWidget(brand)
         side.addSpacing(24)
         self.navigation=HoverNavigation()
         self.navigation.setObjectName("navigation")
-        self.navigation.addItems(["Dashboard","Downloads","Local Music","Playlists","Settings / Setup"])
+        self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.navigation_names=["Dashboard","Downloads","Local Music","Playlists","Settings / Setup"]
+        self.navigation.addItems(self.navigation_names)
+        for index,name in enumerate(self.navigation_names):self.navigation.item(index).setToolTip(name)
         side.addWidget(self.navigation)
-        side.addWidget(muted(f"Version {VERSION}"))
+        self.sidebar_version=muted(f"Version {VERSION}");side.addWidget(self.sidebar_version)
         row.addWidget(sidebar)
         content=QWidget()
         content.setObjectName("content")
@@ -193,9 +202,20 @@ class Window(QMainWindow):
         self.reset_integrations(load_preview=not defer_startup)
         self.apply_theme(self.theme)
         self.set_row_height(self.catalogue.get_setting("row_height",40))
+        self.set_sidebar_collapsed(self.catalogue.get_setting('sidebar_collapsed',False))
         self.navigation.setCurrentRow(0)
         if defer_startup:self.status.setText("Loading library…");QTimer.singleShot(50,self.initial_load)
         else:self.refresh()
+
+    def set_sidebar_collapsed(self,collapsed):
+        self.sidebar.setFixedWidth(68 if collapsed else 198)
+        self.sidebar_layout.setContentsMargins(8 if collapsed else 18,28,8 if collapsed else 18,20)
+        self.sidebar_brand.setVisible(not collapsed);self.sidebar_version.setVisible(not collapsed)
+        for index,name in enumerate(self.navigation_names):self.navigation.item(index).setText('' if collapsed else name)
+        self.titlebar.menu_button.setToolTip('Expand navigation' if collapsed else 'Collapse navigation')
+        self.catalogue.set_setting('sidebar_collapsed',bool(collapsed))
+
+    def toggle_sidebar(self):self.set_sidebar_collapsed(not self.catalogue.get_setting('sidebar_collapsed',False))
 
     def play_row(self,row):
         try:
@@ -549,12 +569,21 @@ class Window(QMainWindow):
         layout.setContentsMargins(0,8,0,0)
         self.playlist_tabs.addTab(panel,"ZotiBox playlists")
         bar=QHBoxLayout()
-        for text,action,icon in [("New local playlist",self.new_playlist,"SP_FileIcon"),("Link Spotify playlist…",self.link_spotify,"SP_DialogOpenButton"),
-            ("New folder",self.new_playlist_folder,"SP_DirIcon"),("Review all",lambda:self.review_needed(True),"SP_FileDialogContentsView"),
-            ("Sync selected",self.sync_selected,"SP_BrowserReload"),("Sync all linked",self.sync_all,"SP_BrowserReload"),("Export…",self.export_menu,"SP_DialogSaveButton")]:
-            bar.addWidget(self.button(text,action,icon))
+        for label,buttons in [('Create',[
+                ('New playlist',self.new_playlist,'SP_FileIcon',False),('New folder',self.new_playlist_folder,'SP_DirIcon',False)]),
+            ('Spotify links',[('Link playlist…',self.link_spotify,'SP_DialogOpenButton',False)]),
+            ('Synchronise',[('Sync all linked',self.sync_all,'SP_BrowserReload',True),
+                ('Sync with Rekordbox…',lambda:self.rb_panel.sync_many(),'SP_ArrowRight',True)])]:
+            group=QWidget();group_layout=QVBoxLayout(group);group_layout.setContentsMargins(0,0,12,0)
+            group_layout.addWidget(muted(label));buttons_row=QHBoxLayout();group_layout.addLayout(buttons_row)
+            for text,action,icon,primary in buttons:buttons_row.addWidget(self.button(text,action,icon,primary))
+            bar.addWidget(group)
         bar.addStretch()
         layout.addLayout(bar)
+        bar=QHBoxLayout()
+        self.queue_missing_button=self.button('Queue missing',self.queue_missing,'SP_ArrowDown');bar.addWidget(self.queue_missing_button)
+        self.review_all_button=self.button('Review all',lambda:self.review_needed(True),'SP_FileDialogContentsView');bar.addWidget(self.review_all_button)
+        bar.addStretch();bar.addWidget(self.button('Export…',self.export_menu,'SP_DialogSaveButton'));layout.addLayout(bar)
         splitter=QSplitter()
         panel=QWidget()
         left=QVBoxLayout(panel)
@@ -591,14 +620,12 @@ class Window(QMainWindow):
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             actions.addWidget(control)
         self.review_button=self.button("Review needed…",self.review_needed,"SP_FileDialogContentsView");actions.addWidget(self.review_button)
-        self.queue_missing_button=self.button("Queue missing",self.queue_missing,"SP_ArrowDown");actions.addWidget(self.queue_missing_button)
         actions.addStretch()
         right.addLayout(actions)
         splitter.addWidget(panel)
         splitter.setSizes([250,1050])
         layout.addWidget(splitter,1)
-        actions.addWidget(self.button("Send / resync to Rekordbox…",lambda:self.rb_panel.sync_local(),"SP_ArrowRight",True))
-        right.addWidget(muted("Spotify workflow: Sync selected → Queue missing → Send / resync to Rekordbox → review and Apply."))
+        right.addWidget(muted("Sync all linked → Queue missing → download → Sync with Rekordbox → review and Apply."))
         right.addWidget(self.row_size_control())
         self.rb_panel=RekordboxPanel(self)
         self.playlist_tabs.addTab(self.rb_panel,"Rekordbox")
@@ -699,11 +726,11 @@ class Window(QMainWindow):
         form.addWidget(self.auto_download)
         self.zotify_status=muted("Zotify: not connected")
         form.addWidget(self.zotify_status)
-        bar=QHBoxLayout()
-        for text,action in [("Connect Zotify",self.connect_zotify),("Open pending login",self.open_pending_login),("All Zotify settings…",self.zotify_settings)]:
-            bar.addWidget(self.button(text,action))
-        bar.addStretch()
-        form.addLayout(bar)
+        for actions in [[("Connect Zotify",self.connect_zotify),("Fresh Zotify login",lambda:self.connect_zotify(True)),('Open pending login',self.open_pending_login)],
+            [('Last download error…',self.last_download_error),('All Zotify settings…',self.zotify_settings)]]:
+            bar=QHBoxLayout()
+            for text,action in actions:bar.addWidget(self.button(text,action))
+            bar.addStretch();form.addLayout(bar)
         form.addStretch()
         form=section("Database","SP_DialogOpenButton","Open, import or relocate your catalogue.")
         form.addWidget(QLabel("ZotiBox Database"))
@@ -724,12 +751,14 @@ class Window(QMainWindow):
         form.addWidget(QLabel(f"Installed version: {VERSION}"))
         self.update_source=QComboBox()
         self.update_source.addItems(["GitHub releases (Kit-Leeming/zotibox)","Local / shared folder"])
+        self.update_source.setCurrentIndex(self.catalogue.get_setting('update_source',0))
+        self.update_source.currentIndexChanged.connect(lambda value:self.catalogue.set_setting('update_source',value))
         form.addWidget(self.update_source)
         self.update_folder=QLineEdit(self.catalogue.get_setting("update_folder",""))
         self.update_folder.setReadOnly(True)
         self.update_folder.setPlaceholderText("Folder containing ZotiBox installers")
         form.addWidget(self.update_folder)
-        self.update_folder.setVisible(False)
+        self.update_folder.setVisible(self.update_source.currentIndex()==1)
         self.update_source.currentIndexChanged.connect(lambda value:self.update_folder.setVisible(value==1))
         bar=QHBoxLayout()
         bar.addWidget(self.button("Choose update folder…",self.choose_update_folder,"SP_DirOpenIcon"))
@@ -742,6 +771,10 @@ class Window(QMainWindow):
         self.update_status=muted("No update checked yet")
         form.addWidget(self.update_status)
         self.available_update=None
+        self.startup_updates=QCheckBox('Check for updates when ZotiBox starts')
+        self.startup_updates.setChecked(self.catalogue.get_setting('check_updates_on_start',True))
+        self.startup_updates.toggled.connect(lambda value:self.catalogue.set_setting('check_updates_on_start',value))
+        form.addWidget(self.startup_updates)
         form.addStretch()
         form=section("Rekordbox","SP_FileDialogListView","Read the collection and prepare changes on a copy. Live writes require explicit opt-in and an automatic backup.")
         self.rb_path=QLineEdit(str(self.rb_panel.backend.source))
@@ -789,6 +822,36 @@ class Window(QMainWindow):
             self.update_status.setText(f"Version {update['version']} is available" if update else "No newer release available")
         self.install_update_button.setEnabled(False)
         self.start_job("Checking for updates",lambda progress,cancel:github_update() if self.update_source.currentIndex()==0 else find_update(self.update_folder.text()),complete)
+
+    def schedule_startup_checks(self):
+        if self.catalogue.get_setting('matching_revision',0)<2:
+            QTimer.singleShot(500,self.upgrade_match_decisions)
+        if not self.catalogue.get_setting('check_updates_on_start',True):return
+        source=self.catalogue.get_setting('update_source',0);folder=self.catalogue.get_setting('update_folder','')
+        def check():
+            try:
+                update=github_update() if source==0 else find_update(folder)
+                self.integration_event.emit('startup_update',update)
+            except Exception:
+                try:self.integration_event.emit('startup_update_error',None)
+                except RuntimeError:pass
+        threading.Thread(target=check,daemon=True,name='ZotiBox update check').start()
+
+    def upgrade_match_decisions(self):
+        if self.close_pending:return
+        if self.job:QTimer.singleShot(1000,self.upgrade_match_decisions);return
+        def complete(count):self.status.setText(f'Match review updated: {count} track(s) classified')
+        self.start_job('Updating match review',lambda progress,cancel:reclassify_reviews(self.catalogue,progress,cancel),complete)
+
+    def prompt_startup_update(self):
+        if self.close_pending or not self.isVisible():return
+        if self.job or self.scan_job or self.download_job:QTimer.singleShot(1500,self.prompt_startup_update);return
+        if not self.available_update:return
+        box=QMessageBox(QMessageBox.Icon.Information,'ZotiBox update available',
+            f"ZotiBox {self.available_update['version']} is available. Install the update now? Your library and settings will be kept.",parent=self)
+        install=box.addButton('Update now',QMessageBox.ButtonRole.AcceptRole)
+        later=box.addButton('Later',QMessageBox.ButtonRole.RejectRole);box.setDefaultButton(later);box.exec()
+        if box.clickedButton()==install:self.install_update()
 
     def install_update(self):
         try:
@@ -893,7 +956,7 @@ class Window(QMainWindow):
     def navigate(self,index):
         self.scan_button.setVisible(index==2)
         self.pages.setCurrentIndex(index)
-        self.heading.setText(self.navigation.item(index).text())
+        self.heading.setText(self.navigation_names[index])
         self.artwork_timer.start()
         if index==3:self.rb_panel.ensure_loaded()
 
@@ -1061,8 +1124,14 @@ class Window(QMainWindow):
         review_count=len({e['spotify_id'] for e in entries if e['match_state']=='review' and e['spotify_id']})
         self.review_button.setVisible(bool(review_count))
         self.review_button.setText(f'Review needed ({review_count})…')
-        self.queue_missing_button.setVisible(any(e["match_state"]=="missing" for e in entries))
+        self.refresh_global_playlist_controls()
         self.playlist_summary.setText(f"{playlist['name']} · {'Spotify membership and order' if playlist['source']=='spotify' else 'Local playlist'} · Rekordbox: {'linked' if playlist['rekordbox_id'] else 'not linked'}" if playlist else "Select a playlist")
+
+    def refresh_global_playlist_controls(self):
+        missing=len(self.catalogue.missing_tracks());self.queue_missing_button.setVisible(bool(missing))
+        self.queue_missing_button.setText(f'Queue missing ({missing})')
+        with self.catalogue.connect() as db:review=db.execute("SELECT count(DISTINCT spotify_id) FROM entries WHERE match_state='review'").fetchone()[0]
+        self.review_all_button.setVisible(bool(review));self.review_all_button.setText(f'Review all ({review})')
 
     def refresh_live(self):
         self.refresh_downloads()
@@ -1079,6 +1148,7 @@ class Window(QMainWindow):
 
     def refresh_downloads(self):
         jobs=self.catalogue.download_jobs()
+        self.refresh_global_playlist_controls()
         self.update_download_controls()
         recent=[j for j in reversed(jobs) if j["state"]=="complete" and j["output"]][:10]
         self.fill_table(self.recent_table,recent,lambda i,r:[r["title"],r["artist"],Path(r["output"]).name])
@@ -1102,7 +1172,10 @@ class Window(QMainWindow):
         self.queue_progress.setValue(round(1000*(1-remaining/total)) if total else 0)
         self.queue_progress.setFormat("%p% of queued audio")
         current=next((row for row in active if row["state"]=="running"),None)
-        self.queue_summary.setText(f"{len(active)} track(s) remaining · ~{duration(remaining)} audio time remaining" + (f" · {current['title']} ({current['progress']:.0f}%)" if current else "") if active else "Queue complete" if relevant else "Queue empty")
+        finish=(datetime.now()+timedelta(seconds=remaining)).strftime('%H:%M')
+        running=self.download_job is not None and not self.engine.cancel.is_set()
+        estimate=f' · estimated finish {finish}' if running else ' · paused / waiting to start'
+        self.queue_summary.setText(f"{len(active)} track(s) remaining · ~{clock_duration(remaining)} audio time remaining{estimate}" + (f" · {current['title']} ({current['progress']:.0f}%)" if current else "") if active else "Queue complete" if relevant else "Queue empty")
 
     def selected_files(self):
         return [item.data(0,ROLE) for item in self.files_table.selectedItems() if (item.data(0,ROLE) or {}).get("kind")=="file"]
@@ -1395,6 +1468,7 @@ class Window(QMainWindow):
         kind=self.search_kind.currentData()
         if not query:
             return
+        if self.offer_playlist_sync(query):return
         def work(progress,cancel):
             if query.startswith(("https://open.spotify.com/","spotify:")):
                 return [dict(track,type="track") for track in self.spotify.tracks_for_url(query,cancel)]
@@ -1411,6 +1485,17 @@ class Window(QMainWindow):
                         "count":item.get("total_tracks",(item.get("items") or item.get("tracks") or {}).get("total",""))})
             return results
         self.start_job("Searching Spotify",work,self.show_results)
+
+    def offer_playlist_sync(self,query):
+        if not query.startswith(('https://open.spotify.com/','spotify:playlist:')):return False
+        try:id_=spotify_id(query,'playlist')
+        except ValueError:return False
+        existing=next((p for p in self.catalogue.playlists() if p['source']=='spotify' and p['spotify_id']==id_),None)
+        prompt='This playlist is already linked. Sync it now? Choose No to browse its tracks instead.' if existing else 'Create a Spotify playlist sync for this playlist? Choose No to browse its tracks instead.'
+        answer=QMessageBox.question(self,'Spotify playlist',prompt,QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No|QMessageBox.StandardButton.Cancel)
+        if answer==QMessageBox.StandardButton.Yes:
+            self.navigation.setCurrentRow(3);self.playlist_tabs.setCurrentIndex(0);self.sync_ids([id_]);return True
+        return answer==QMessageBox.StandardButton.Cancel
 
     def show_results(self,rows):
         self.download_tabs.setCurrentIndex(0)
@@ -1475,6 +1560,7 @@ class Window(QMainWindow):
             return
         def work(progress,cancel):
             reports=[]
+            available=local_recordings(self.catalogue)
             for remote_id in ids:
                 snapshot=self.spotify.snapshot(remote_id,cancel)
                 progress(0,snapshot["name"])
@@ -1484,7 +1570,7 @@ class Window(QMainWindow):
                     if cancel.is_set():
                         raise InterruptedError("Sync cancelled; current playlist kept")
                     self.catalogue.save_remote(track)
-                    resolved[track["id"]]=match_track(self.catalogue,track)
+                    resolved[track["id"]]=match_track(self.catalogue,track,available)
                 reports.append(self.catalogue.sync_playlist(snapshot,resolved))
                 if self.catalogue.get_setting("auto_download",False):
                     for track in snapshot["tracks"]:
@@ -1502,16 +1588,10 @@ class Window(QMainWindow):
             QTimer.singleShot(250,self.start_downloads)
 
     def queue_missing(self):
-        skipped=0
-        for entry in self.catalogue.entries(self.playlist_id) if self.playlist_id else []:
-            if entry["spotify_id"] and entry["match_state"]=="missing":
-                track=self.catalogue.remote_track(entry['spotify_id'])
-                if track and track['playable']:self.catalogue.enqueue(entry["spotify_id"])
-                else:skipped+=1
+        tracks=self.catalogue.missing_tracks()
+        for track in tracks:self.catalogue.enqueue(track['id'])
         self.refresh_downloads()
-        self.navigation.setCurrentRow(1)
-        self.download_tabs.setCurrentIndex(1)
-        if skipped:self.status.setText(f'{skipped} unavailable track(s) skipped')
+        self.status.setText(f'Queued {len(tracks)} missing track(s) across all playlists')
 
     def review_needed(self,all_playlists=False):
         playlists=self.catalogue.playlists() if all_playlists else [{'id':self.playlist_id}] if self.playlist_id else []
@@ -1598,17 +1678,24 @@ class Window(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         dialog.exec()
 
-    def connect_zotify(self):
+    def connect_zotify(self,fresh=False):
         if self.job or self.download_job:
             return
         self.engine.cancel.clear()
-        self.download_job=Job(lambda progress,cancel:self.engine.authenticate(),self)
+        self.download_job=Job(lambda progress,cancel:self.engine.authenticate(fresh=fresh),self)
         self.download_job.finished_result.connect(lambda text:self.status.setText(text))
         self.download_job.failed.connect(self.job_error)
         self.download_job.cancelled.connect(self.status.setText)
         self.download_job.finished.connect(self.download_finished)
         self.download_job.start()
         self.status.setText("Connecting Zotify; complete the browser login(s)")
+
+    def last_download_error(self):
+        import json
+        path=self.catalogue.workspace/'.local'/'last-worker-error.json'
+        detail=json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+        text='No diagnostic has been saved yet.' if not detail else str(detail.get('type','Download failure'))+'\n'+'\n'.join(f"{frame['file']}:{frame['line']} — {frame['function']}" for frame in detail.get('frames',[]))
+        QMessageBox.information(self,'Last download diagnostic',text)
 
     def start_downloads(self):
         if self.download_job:
@@ -1645,7 +1732,12 @@ class Window(QMainWindow):
 
     @Slot(str,object)
     def handle_integration_event(self,kind,value):
-        if kind=="auth_url":
+        if kind=='startup_update':
+            self.available_update=value;self.install_update_button.setEnabled(bool(value))
+            self.update_status.setText(f"Version {value['version']} is available" if value else 'No newer release available')
+            if value:QTimer.singleShot(500,self.prompt_startup_update)
+        elif kind=='startup_update_error':self.update_status.setText('Startup update check unavailable; try Check for updates again.')
+        elif kind=="auth_url":
             url=QUrl(value)
             if url.scheme()=="https" and url.host()=="accounts.spotify.com":
                 self.pending_login=value

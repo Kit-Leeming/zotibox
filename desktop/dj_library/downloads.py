@@ -139,12 +139,12 @@ class DownloadEngine:
                 if name in data:
                     atomic_json(stage / name, data[name])
 
-    def invoke(self, stage, track_id=None, authenticate=False, job_id=None):
+    def invoke(self, stage, track_id=None, authenticate=False, job_id=None,fresh=False):
         staging_root=(self.catalogue.workspace/".local"/"staging").resolve()
         if stage.resolve()==staging_root or not stage.resolve().is_relative_to(staging_root):
             raise ValueError("Worker staging path is outside this database's staging folder")
         stage.mkdir(parents=True, exist_ok=True)
-        self._credentials(stage)
+        if not fresh:self._credentials(stage)
         config = stage / "config.json"
         atomic_json(config, worker_config(self.catalogue, stage))
         environment = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -193,6 +193,7 @@ class DownloadEngine:
                 if job_id:self.catalogue.update_download(job_id,message=source_description(source_format))
             elif kind == "error":
                 errors.append(message.get("message", "Zotify failed"))
+                atomic_json(self.catalogue.workspace/'.local'/'last-worker-error.json',message.get('diagnostic',{}))
             self.event("refresh", "")
         exit_code = self.process.wait()
         timer.cancel()
@@ -215,11 +216,11 @@ class DownloadEngine:
         if resolved != staging_root and resolved.is_relative_to(staging_root):
             shutil.rmtree(resolved, ignore_errors=True)
 
-    def authenticate(self):
+    def authenticate(self,fresh=False):
         import uuid
         stage = self.catalogue.workspace / ".local" / "staging" / ("login-" + str(uuid.uuid4()))
         try:
-            self.invoke(stage, authenticate=True)
+            self.invoke(stage, authenticate=True,fresh=fresh)
             return "Zotify connected"
         finally:
             self.cleanup(stage)

@@ -1,63 +1,60 @@
 # ZotiBox
 
-Windows music catalogue, Spotify playlists, Zotify downloads and Rekordbox management.
+A Windows desktop app for organising local music, keeping Spotify playlists in sync, downloading through Zotify, and preparing Rekordbox library updates.
 
-## Install and update
+**[Download for Windows](https://github.com/Kit-Leeming/zotibox/releases/latest)** · [Report a bug](https://github.com/Kit-Leeming/zotibox/issues) · [Build from source](docs/BUILD.md)
 
-Download the Windows installer from [Releases](https://github.com/Kit-Leeming/zotibox/releases/latest).
-Install over the existing app folder when updating; uninstalling is unnecessary.
-Launching again restores the existing window. Startup progress appears while the library loads.
-No Python environment or P: drive is required. The default installation is in your Windows user profile.
-The app creates **ZotiBox Database** beside its EXE. Settings → Database can relocate it.
-Settings → Updates checks GitHub and downloads a checksum-verified installer.
+![ZotiBox playlist management](docs/images/playlists.png)
 
-## Setup
+## What it does
 
-1. Settings → Library folders: add your music folders, then scan.
-2. Create a Web API app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-   Register `http://127.0.0.1:4381/callback` and `http://127.0.0.1:4381/login` as redirect URIs.
-3. Settings → Spotify account: enter its Client ID and connect. No client secret is needed.
-4. Settings → Downloads: choose a destination and connect Zotify; complete both browser login steps.
-   Other testers need their own Client ID or access to your developer app's allowlist.
-5. Settings → Rekordbox: select `master.db` and connect. The tested version is **7.2.11**.
+- Index music in existing folders, find duplicates and match local files to Spotify tracks.
+- Keep linked playlists in Spotify order, review uncertain matches and queue missing tracks across the library.
+- Download tracks, albums and playlists into one shared music folder, with progress and an estimated finish time.
+- Preview playlist and metadata changes for Rekordbox, then apply them with verified backups.
+- Browse folder trees, drag tracks and playlists, and preview audio with a waveform and available Rekordbox cue markers.
+- Customise colours, gradients and row sizes. Collapse navigation for more workspace.
 
-## Use
+Screenshots use generated demo data.
 
-- **Downloads:** search or paste a Spotify track/album/playlist URL, queue tracks and start.
-  Downloads run sequentially at real-time speed. Results and file details show the selected source format.
-  FLAC output does not guarantee a lossless source; the fork may fall back when requesting lossless.
-- **Local Music:** search the folder tree; right-click for details, Explorer and playlist actions.
-  Drag songs into local playlists or Rekordbox previews; hover navigation/tabs to switch while dragging.
-  Drag within editable playlists to reorder. Spotify-linked membership stays controlled by Spotify.
-  Use Row size to adjust thumbnails. File deletion prompts before using the Windows Recycle Bin.
-  Discovery can run alongside downloads and Spotify tasks. Existing music is never replaced automatically.
-- **Playlists:** create local playlists or link owned/collaborative Spotify playlists.
-  Use **Review needed** for the selected playlist or **Review all** for every unresolved song.
-  **Not in local library** saves it as missing; then use **Queue missing**. Review shortcuts:
-  Alt+Left/Right for previous/next, Alt+M to mark missing and advance.
-  Create folders and drag playlists/folders into them; drop in empty tree space or use
-  **Move to top level** to move out. ZotiBox folders are independent of Spotify folders.
-  Linked membership and order follow Spotify. To update Rekordbox: **Sync selected → Queue missing →
-  Start downloads → Send / resync to Rekordbox → review → Apply**. Missing files are skipped, including
-  when creating an empty playlist; resync after downloads to add them. Export settings and M3U8 are here.
-- **Playlists → Rekordbox:** view the collection/folders, prepare playlists and metadata edits,
-  or preview a ZotiBox playlist sync. Right-click to rename, export or delete a playlist/folder.
-  Playlist deletion retains collection tracks, cues and music files. Review changes before Apply.
-- Double-click a local track to play. The player includes volume, a seekable waveform and the cue/loop
-  points available in the connected Rekordbox database. Cue markers are read-only; this is a preview player.
-- Playlist pickers have search and filters. Spotify does not expose its playlist folder structure through
-  the Web API. Dashboard shows recent completed downloads.
-- **Settings → Appearance:** choose a visual preset or edit background/accent colours.
-  Harmony swatches stay anchored while choosing gradient endpoints.
+<details>
+<summary>Local music and download queue screenshots</summary>
 
-## Rekordbox backups and writes
+![Local music folder tree and cover thumbnails](docs/images/local-music.png)
 
-Rekordbox can stay open for viewing and preparing previews; close it for Backup, Apply or Restore.
-Writes are disabled initially. You can first use Rekordbox's **File → Library → Backup Library**.
-Close Rekordbox, then enable writes in Settings → Rekordbox; ZotiBox verifies a data-directory backup.
-Every Apply and Restore creates another backup. External music files are excluded from these backups.
-Existing track IDs, cues and analysis data are retained; newly imported tracks need Rekordbox analysis.
-Metadata edits affect the Rekordbox database, not audio-file tags. Smart/system playlists are read-only.
+![Download queue with remaining audio time and estimated finish](docs/images/downloads.png)
 
-Desktop/laptop synchronisation is not included. Manual `.zotibox` export/import is available.
-Build instructions and validation details are in [docs](docs/BUILD.md).
+</details>
+
+## Install
+
+Download and run the latest installer on **Windows 10 or 11, 64-bit**. Updates install over the existing version; uninstalling first is unnecessary. ZotiBox checks for updates at startup and also under **Settings → Updates**.
+
+The catalogue is stored in **ZotiBox Database** beside the application. Use **Settings → Database** to choose another location. Music stays in its existing folders unless you explicitly move or delete it.
+
+## Connect your library
+
+1. **Settings → Library folders:** add music folders, then scan from Local Music.
+2. Create a Web API app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and register both redirect URIs:
+   - `http://127.0.0.1:4381/callback`
+   - `http://127.0.0.1:4381/login`
+3. **Settings → Spotify account:** enter the Client ID and connect. No client secret is required. The account must have access to the developer app; development-mode users need their own app or an allowlist invitation.
+4. **Settings → Downloads:** choose the music destination and connect Zotify. Its streaming and developer authorisations may each open a browser. Saved valid logins are reused; use **Fresh Zotify login** to reconnect explicitly.
+5. **Settings → Rekordbox:** select `master.db` and connect. Rekordbox **7.2.11** is the tested version.
+
+## Spotify to Rekordbox
+
+**Link playlist → Sync all linked → Review needed → Queue missing → Start downloads → Sync with Rekordbox → Preview → Apply**
+
+Paste a Spotify playlist into search to create a new sync. Spotify controls linked membership and ordering; local playlists remain independent. **Queue missing** covers every linked playlist and keeps you on the current page. In review, **Not in local library** makes a track eligible for that queue. Weak candidates are classified as missing; strong but ambiguous candidates remain for review.
+
+**Sync with Rekordbox** lets you choose multiple playlists to create or update. Missing files are skipped, including when creating an empty playlist; sync again after downloading. Rekordbox changes stay in a preview until Apply. Single-playlist sync is available from its right-click menu.
+
+## Backups and current limits
+
+- Rekordbox can stay open for viewing and preparing previews. Close it before Backup, Apply or Restore. Database writes are disabled initially; every Apply and Restore creates a verified backup. External music files are not included in those backups.
+- Track identities, existing cues and analysis data are preserved where possible. New tracks need Rekordbox analysis. Cue markers are read-only, and metadata edits affect the Rekordbox database rather than audio-file tags.
+- Zotify downloads one track at a time at real-time speed. Finish times are estimates and exclude login, conversion and retry delays. FLAC output alone does not prove lossless audio; source-format information appears in the queue and file details.
+- Spotify playlist folders are unavailable through the Web API. ZotiBox provides its own folders. Automatic PC-to-PC sync is not included; manual `.zotibox` export/import is available.
+
+Zotify integration uses the [ZahBoy fork](https://github.com/ZahBoy/zotify). Dependency licences and attribution are listed in [third-party notices](THIRD-PARTY-NOTICES.md).

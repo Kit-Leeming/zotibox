@@ -2,7 +2,7 @@
 from pathlib import Path
 from PySide6.QtCore import Qt,QTimer,QSize
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
-    QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication)
+    QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication,QListWidget,QListWidgetItem)
 from PySide6.QtGui import QAction,QKeySequence
 from .rekordbox import Rekordbox
 from .playlist_picker import choose_playlist
@@ -342,5 +342,37 @@ class RekordboxPanel(QWidget):
             if not self.backend.state:self.backend.connect()
             target=self.backend.sync_local(id_,playlist["rekordbox_id"])
             view=self.backend.view();view["_selection"]=target;return view
-        self.owner.playlist_tabs.setCurrentIndex(1)
         self.task("Preparing Rekordbox sync preview",work)
+        self.owner.playlist_tabs.setCurrentIndex(1)
+
+    def sync_many(self):
+        if self.owner.job:self.owner.status.setText('Wait for the current task before preparing a Rekordbox sync');return
+        playlists=self.owner.catalogue.playlists()
+        if not playlists:self.owner.status.setText('Create or link a playlist first');return
+        dialog=QDialog(self);dialog.setWindowTitle('Sync playlists with Rekordbox');dialog.resize(620,500)
+        layout=QVBoxLayout(dialog);label=QLabel('Choose playlists to create or update in the Rekordbox preview. Missing tracks are skipped. Review and Apply separately.');label.setWordWrap(True);layout.addWidget(label)
+        search=self.owner.search_bar('Filter playlist names');layout.addWidget(search)
+        listing=QListWidget();layout.addWidget(listing,1)
+        links=(self.backend.state or {}).get('links',{});has_links=any(p['rekordbox_id'] or p['id'] in links for p in playlists)
+        for p in playlists:
+            linked=bool(p['rekordbox_id'] or p['id'] in links)
+            item=QListWidgetItem(p['name']+(' · linked' if linked else ' · new playlist'));item.setData(ROLE,p)
+            item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if linked or (not has_links and p['source']=='spotify') else Qt.CheckState.Unchecked);listing.addItem(item)
+        search.textChanged.connect(lambda query:[listing.item(i).setHidden(query.casefold() not in listing.item(i).text().casefold()) for i in range(listing.count())])
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Prepare sync')
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+        if not dialog.exec():return
+        selected=[listing.item(i).data(ROLE) for i in range(listing.count()) if listing.item(i).checkState()==Qt.CheckState.Checked]
+        if not selected:return
+        def work(progress,cancel):
+            if not self.backend.state:self.backend.connect()
+            count=0
+            for playlist in selected:
+                if cancel.is_set():break
+                self.backend.sync_local(playlist['id'],playlist['rekordbox_id']);count+=1;progress(count,playlist['name'])
+            view=self.backend.view();view['_batch_count']=count;return view
+        def complete(data):
+            count=data.pop('_batch_count');self.loaded(data);self.owner.status.setText(f'Prepared {count} playlist(s); review the Rekordbox preview and Apply when ready')
+        self.owner.start_job('Preparing Rekordbox playlist sync',work,complete)
+        self.owner.playlist_tabs.setCurrentIndex(1)
