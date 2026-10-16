@@ -54,6 +54,8 @@ def match_track(catalogue, track):
         return {"recording_id": saved["recording_id"], "state": "matched"}
     if saved and saved["recording_id"]:
         return {"recording_id": saved["recording_id"], "state": "unavailable"}
+    if saved and saved["decision"] == "missing":
+        return {"recording_id": None, "state": "missing" if track.get("playable", True) else "unavailable"}
     ranked = candidates(catalogue, track)
     if ranked and ranked[0]["strong"] and (len(ranked) == 1 or ranked[0]["score"] - ranked[1]["score"] >= 0.08):
         catalogue.save_remote(track)

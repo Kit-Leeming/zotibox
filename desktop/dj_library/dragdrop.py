@@ -18,12 +18,33 @@ class DragMixin:
         callback=getattr(self,'drag_payload',None);payload=callback() if callback else None
         if not payload:return
         mime=QMimeData();mime.setData(MIME,json.dumps(payload).encode())
-        drag=QDrag(self);drag.setMimeData(mime);drag.exec(Qt.DropAction.CopyAction|Qt.DropAction.MoveAction,Qt.DropAction.CopyAction)
+        drag=QDrag(self);drag.setMimeData(mime)
+        action=Qt.DropAction.MoveAction if payload.get('kind')=='playlist' else Qt.DropAction.CopyAction
+        drag.exec(Qt.DropAction.CopyAction|Qt.DropAction.MoveAction,action)
     def dragEnterEvent(self,event):
         if decode(event.mimeData()) and getattr(self,'drop_tracks',None):event.acceptProposedAction()
         else:event.ignore()
-    def dragMoveEvent(self,event):self.dragEnterEvent(event)
+    def dragMoveEvent(self,event):
+        self.dragEnterEvent(event)
+        if event.isAccepted() and hasattr(self,'topLevelItemCount'):
+            item=self.itemAt(event.position().toPoint())
+            if item is not getattr(self,'_hover_item',None):
+                self._hover_item=item
+                if not hasattr(self,'_expand_timer'):
+                    self._expand_timer=QTimer(self);self._expand_timer.setSingleShot(True);self._expand_timer.setInterval(650)
+                    self._expand_timer.timeout.connect(self._expand_hover)
+                self._expand_timer.start()
+    def _expand_hover(self):
+        item=getattr(self,'_hover_item',None)
+        try:
+            if item and item.treeWidget() is self:item.setExpanded(True)
+        except RuntimeError:self._stop_hover() # A background refresh may have replaced the tree items.
+    def _stop_hover(self):
+        if hasattr(self,'_expand_timer'):self._expand_timer.stop()
+        self._hover_item=None
+    def dragLeaveEvent(self,event):self._stop_hover();event.accept()
     def dropEvent(self,event):
+        self._stop_hover()
         data=decode(event.mimeData());callback=getattr(self,'drop_tracks',None)
         if data and callback and callback(data,event.position().toPoint()):event.acceptProposedAction()
         else:event.ignore()

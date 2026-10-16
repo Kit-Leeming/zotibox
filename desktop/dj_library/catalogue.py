@@ -106,6 +106,10 @@ class Catalogue:
                 CREATE TABLE IF NOT EXISTS changes(id TEXT PRIMARY KEY, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     action TEXT NOT NULL, timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS playlist_folders(id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    parent_id TEXT REFERENCES playlist_folders(id));
+                CREATE TABLE IF NOT EXISTS playlist_locations(playlist_id TEXT PRIMARY KEY REFERENCES playlists(id) ON DELETE CASCADE,
+                    folder_id TEXT NOT NULL REFERENCES playlist_folders(id));
             """)
             if not db.execute("SELECT 1 FROM workspace").fetchone():
                 db.execute("INSERT INTO workspace VALUES (?, 2)", (uid(),))
@@ -395,8 +399,54 @@ class Catalogue:
     def decide_match(self, spotify_id, recording_id, decision="confirmed", evidence="User selection"):
         with self.connect() as db:
             db.execute("INSERT OR REPLACE INTO matches VALUES (?,?,?,?)", (spotify_id, recording_id, decision, evidence))
-            db.execute("UPDATE entries SET recording_id=?,match_state=? WHERE spotify_id=?", (recording_id, "matched" if recording_id else "missing", spotify_id))
+            track=db.execute('SELECT playable FROM remote_tracks WHERE id=?',(spotify_id,)).fetchone()
+            state='matched' if recording_id else 'unavailable' if track and not track[0] else 'missing'
+            db.execute("UPDATE entries SET recording_id=?,match_state=? WHERE spotify_id=?", (recording_id,state,spotify_id))
             self.change(db, "match", spotify_id, decision)
+
+    def playlist_folders(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute('SELECT * FROM playlist_folders ORDER BY name COLLATE NOCASE')]
+
+    def playlist_locations(self):
+        with self.connect() as db:
+            return dict(db.execute('SELECT playlist_id,folder_id FROM playlist_locations').fetchall())
+
+    def create_playlist_folder(self,name,parent=None):
+        if not name.strip():raise ValueError('Enter a folder name')
+        id_=uid()
+        with self.connect() as db:
+            db.execute('INSERT INTO playlist_folders VALUES (?,?,?)',(id_,name.strip(),parent))
+        return id_
+
+    def move_playlist_item(self,id_,folder=None,is_folder=False):
+        with self.connect() as db:
+            folders={row['id']:dict(row) for row in db.execute('SELECT * FROM playlist_folders')}
+            if folder is not None and folder not in folders:raise ValueError('The destination folder no longer exists')
+            if is_folder:
+                if id_ not in folders:raise ValueError('The folder no longer exists')
+                ancestor=folder;seen=set()
+                while ancestor:
+                    if ancestor==id_ or ancestor in seen:raise ValueError('A folder cannot be moved into itself or its descendants')
+                    seen.add(ancestor);ancestor=folders[ancestor]['parent_id']
+                db.execute('UPDATE playlist_folders SET parent_id=? WHERE id=?',(folder,id_))
+            else:
+                if not db.execute('SELECT 1 FROM playlists WHERE id=?',(id_,)).fetchone():raise ValueError('The playlist no longer exists')
+                db.execute('DELETE FROM playlist_locations WHERE playlist_id=?',(id_,))
+                if folder:db.execute('INSERT INTO playlist_locations VALUES (?,?)',(id_,folder))
+
+    def rename_playlist_folder(self,id_,name):
+        if not name.strip():raise ValueError('Enter a folder name')
+        with self.connect() as db:db.execute('UPDATE playlist_folders SET name=? WHERE id=?',(name.strip(),id_))
+
+    def remove_playlist_folder(self,id_):
+        # Removing an organisational folder keeps every playlist and subfolder.
+        with self.connect() as db:
+            row=db.execute('SELECT parent_id FROM playlist_folders WHERE id=?',(id_,)).fetchone()
+            if not row:raise ValueError('The folder no longer exists')
+            db.execute('UPDATE playlist_folders SET parent_id=? WHERE parent_id=?',(row[0],id_))
+            db.execute('DELETE FROM playlist_locations WHERE folder_id=?',(id_,))
+            db.execute('DELETE FROM playlist_folders WHERE id=?',(id_,))
 
     def sync_playlist(self, snapshot, resolved):
         """Commit only a fully fetched snapshot; membership changes never touch music."""

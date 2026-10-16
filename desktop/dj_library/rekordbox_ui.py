@@ -1,6 +1,6 @@
 """Rekordbox collection and playlist preview inside the Playlists page."""
 from pathlib import Path
-from PySide6.QtCore import Qt,QTimer
+from PySide6.QtCore import Qt,QTimer,QSize
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
     QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication)
 from PySide6.QtGui import QAction,QKeySequence
@@ -29,6 +29,7 @@ class RekordboxPanel(QWidget):
         from .themes import RowDelegate
         self.tree=type(owner.files_table)(lambda:owner.theme)
         self.tree.setItemDelegate(RowDelegate(self.tree,lambda:owner.theme))
+        self.tree.setIconSize(QSize(20,20))
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.tree_context)
@@ -65,10 +66,25 @@ class RekordboxPanel(QWidget):
         self.table.setDragEnabled(True);self.table.setAcceptDrops(True);self.table.setDropIndicatorShown(True)
         self.table.drag_payload=lambda:self.owner.drag_data(self.selected(),native=True)
         self.table.drop_tracks=lambda data,point:self.drop_tracks(data,point)
-        self.tree.setAcceptDrops(True);self.tree.drop_tracks=lambda data,point:self.drop_tracks(data,point,True)
+        self.tree.setAcceptDrops(True);self.tree.setDragEnabled(True);self.tree.setDropIndicatorShown(True)
+        self.tree.drag_payload=self.playlist_drag_data
+        self.tree.drop_tracks=lambda data,point:self.drop_tracks(data,point,True)
+
+    def playlist_drag_data(self):
+        id_=self.current_playlist()
+        playlist=next((p for p in self.data['playlists'] if p['id']==id_),None)
+        if not playlist or playlist['type'] not in {0,1}:return None
+        return {'kind':'playlist','scope':'rekordbox','workspace':str(self.owner.catalogue.workspace),'id':id_}
 
     def drop_tracks(self,data,point,on_tree=False):
         try:
+            if data.get('kind')=='playlist':
+                if not on_tree or data.get('scope')!='rekordbox' or data.get('workspace')!=str(self.owner.catalogue.workspace):return False
+                if self.owner.job:return False
+                item=self.tree.itemAt(point);parent=item.data(0,ROLE) if item else None
+                folder=next((p for p in self.data['playlists'] if p['id']==parent),None)
+                if parent and (not folder or folder['type']!=1):return False
+                self.change('Moving Rekordbox playlist',lambda:self.backend.move_playlist(data['id'],parent));return True
             recordings=self.owner.validate_drag(data)
             item=self.tree.itemAt(point) if on_tree else self.tree.currentItem()
             id_=item.data(0,ROLE) if item else None
@@ -123,7 +139,7 @@ class RekordboxPanel(QWidget):
     def refresh_tree(self):
         reveal=self.data.get("_selection") is not None
         previous=self.data.pop("_selection",None) or self.current_playlist()
-        self.tree.blockSignals(True);self.tree.clear()
+        self.tree.blockSignals(True);self.tree._stop_hover();self.tree.clear()
         collection=QTreeWidgetItem(["Collection"]);collection.setData(0,ROLE,None)
         collection.setIcon(0,self.owner.icon("SP_FileDialogContentsView"));self.tree.addTopLevelItem(collection)
         items={}
@@ -164,6 +180,8 @@ class RekordboxPanel(QWidget):
             menu.addAction("Delete playlist / folder…",self.delete)
             playlist=next((p for p in self.data["playlists"] if p["id"]==self.current_playlist()),None)
             if playlist and playlist["type"]==0:menu.addAction("Export M3U8…",self.export_playlist)
+            if playlist and playlist['type'] in {0,1}:
+                id_=playlist['id'];menu.addAction('Move to top level',lambda:self.change('Moving playlist',lambda:self.backend.move_playlist(id_)))
         menu.addAction("Collapse all folders",self.tree.collapseAll)
         menu.exec(self.tree.viewport().mapToGlobal(point))
 

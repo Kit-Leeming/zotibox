@@ -32,6 +32,11 @@ Settings → Updates checks GitHub and downloads a checksum-verified installer.
   Use Row size to adjust thumbnails. File deletion prompts before using the Windows Recycle Bin.
   Discovery can run alongside downloads and Spotify tasks. Existing music is never replaced automatically.
 - **Playlists:** create local playlists or link owned/collaborative Spotify playlists.
+  Use **Review needed** for the selected playlist or **Review all** for every unresolved song.
+  **Not in local library** saves it as missing; then use **Queue missing**. Review shortcuts:
+  Alt+Left/Right for previous/next, Alt+M to mark missing and advance.
+  Create folders and drag playlists/folders into them; drop in empty tree space or use
+  **Move to top level** to move out. ZotiBox folders are independent of Spotify folders.
   Linked membership and order follow Spotify. To update Rekordbox: **Sync selected → Queue missing →
   Start downloads → Send / resync to Rekordbox → review → Apply**. Missing files are skipped, including
   when creating an empty playlist; resync after downloads to add them. Export settings and M3U8 are here.

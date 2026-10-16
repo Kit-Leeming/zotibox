@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBo
     QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider)
 from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTabs
 from .playlist_picker import choose_playlist
+from .playlist_tree import PlaylistTree,PlaylistItem
+from .match_review import MatchReview
 from .player import MusicPlayer
 from .artwork_async import ArtworkCache
 from .instance import acquire_lock
@@ -234,6 +236,7 @@ class Window(QMainWindow):
             "native_playlist":self.rb_panel.current_playlist() if native else None}
 
     def validate_drag(self,data):
+        if data.get('kind')=='playlist':raise ValueError('Drop playlists into a playlist folder')
         if data.get("workspace")!=str(self.catalogue.workspace):raise ValueError("These tracks come from a different database")
         ids=data.get("recordings",[])
         if not isinstance(ids,list) or len(ids)>10000 or any(not isinstance(i,str) for i in ids):raise ValueError("Invalid track selection")
@@ -243,10 +246,20 @@ class Window(QMainWindow):
 
     def drop_local(self,data,point,on_list=False):
         try:
+            if on_list and data.get('kind')=='playlist':
+                if data.get('workspace')!=str(self.catalogue.workspace) or data.get('scope')!='local':return False
+                item=self.playlist_list.itemAt(point)
+                folder=item.data(ROLE+2) if item else None
+                if item and not folder:return False
+                self.catalogue.move_playlist_item(data.get('id'),folder['id'] if folder else None,data.get('folder') is True)
+                if folder:
+                    expanded=set(self.catalogue.get_setting('playlist_expanded',[]));expanded.add(folder['id']);self.catalogue.set_setting('playlist_expanded',sorted(expanded))
+                self.refresh_playlists();return True
             ids=self.validate_drag(data)
             item=self.playlist_list.itemAt(point) if on_list else self.playlist_list.currentItem()
             if not item:return False
             playlist=item.data(ROLE)
+            if not playlist:return False
             if playlist["source"]!="manual":raise ValueError("Spotify controls this playlist. Drop into an independent local playlist instead.")
             if not on_list and data.get("playlist")==playlist["id"] and data.get("entries"):
                 existing=[r["id"] for r in self.catalogue.entries(playlist["id"])]
@@ -266,6 +279,7 @@ class Window(QMainWindow):
         self.entries_table.drag_payload=lambda:self.drag_data([self.entries_table.item(i.row(),0).data(ROLE) for i in self.entries_table.selectionModel().selectedRows()],True)
         self.entries_table.drop_tracks=lambda data,point:self.drop_local(data,point)
         self.playlist_list.setAcceptDrops(True);self.playlist_list.drop_tracks=lambda data,point:self.drop_local(data,point,True)
+        self.playlist_list.drag_payload=self.playlist_drag_data
         self.recent_table.setDragEnabled(True);self.recent_table.drag_payload=lambda:self.drag_data([self.recent_table.item(i.row(),0).data(ROLE) for i in self.recent_table.selectionModel().selectedRows()])
         self.playlist_hover=HoverTabs(self.playlist_tabs)
         self.rb_panel.setup_dragdrop()
@@ -309,7 +323,7 @@ class Window(QMainWindow):
         for table in self.findChildren(QTableWidget):
             table.verticalHeader().setDefaultSectionSize(value);table.setIconSize(QSize(value-8,value-8))
         for tree in self.findChildren(QTreeWidget):
-            tree.setIconSize(QSize(value-8,value-8));tree.doItemsLayout()
+            if tree is self.files_table:tree.setIconSize(QSize(value-8,value-8));tree.doItemsLayout()
         for slider in self.findChildren(QSlider):
             if slider.toolTip()=="Row and cover thumbnail size":
                 block=QSignalBlocker(slider);slider.setValue(value);del block
@@ -536,6 +550,7 @@ class Window(QMainWindow):
         self.playlist_tabs.addTab(panel,"ZotiBox playlists")
         bar=QHBoxLayout()
         for text,action,icon in [("New local playlist",self.new_playlist,"SP_FileIcon"),("Link Spotify playlist…",self.link_spotify,"SP_DialogOpenButton"),
+            ("New folder",self.new_playlist_folder,"SP_DirIcon"),("Review all",lambda:self.review_needed(True),"SP_FileDialogContentsView"),
             ("Sync selected",self.sync_selected,"SP_BrowserReload"),("Sync all linked",self.sync_all,"SP_BrowserReload"),("Export…",self.export_menu,"SP_DialogSaveButton")]:
             bar.addWidget(self.button(text,action,icon))
         bar.addStretch()
@@ -548,10 +563,14 @@ class Window(QMainWindow):
         self.playlist_filter.addItems(["All playlists","Local","Spotify linked","Rekordbox linked"])
         self.playlist_filter.currentIndexChanged.connect(self.refresh_playlists)
         left.addWidget(self.playlist_filter)
-        self.playlist_list=PlaylistList()
+        self.playlist_list=PlaylistTree()
+        self.playlist_list.setIconSize(QSize(20,20))
+        self.playlist_list.setItemDelegate(RowDelegate(self.playlist_list,lambda:self.theme))
         self.playlist_list.currentItemChanged.connect(self.refresh_entries)
         self.playlist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.playlist_list.customContextMenuRequested.connect(self.playlist_context)
+        self.playlist_list.itemExpanded.connect(self.save_playlist_expansion)
+        self.playlist_list.itemCollapsed.connect(self.save_playlist_expansion)
         left.addWidget(self.playlist_list,1)
         splitter.addWidget(panel)
         panel=QWidget()
@@ -571,7 +590,7 @@ class Window(QMainWindow):
         self.remove_entry_button=self.button("Remove entry",self.remove_entry,"SP_DialogCancelButton")
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             actions.addWidget(control)
-        self.review_button=self.button("Review match…",self.review_match,"SP_FileDialogContentsView");actions.addWidget(self.review_button)
+        self.review_button=self.button("Review needed…",self.review_needed,"SP_FileDialogContentsView");actions.addWidget(self.review_button)
         self.queue_missing_button=self.button("Queue missing",self.queue_missing,"SP_ArrowDown");actions.addWidget(self.queue_missing_button)
         actions.addStretch()
         right.addLayout(actions)
@@ -991,7 +1010,18 @@ class Window(QMainWindow):
     def refresh_playlists(self):
         previous=self.playlist_id
         block=QSignalBlocker(self.playlist_list)
+        self.playlist_list._stop_hover()
+        selected=self.playlist_list.currentItem()
+        selected_folder=selected.data(ROLE+2) if selected else None
         self.playlist_list.clear()
+        folders={}
+        for folder in self.catalogue.playlist_folders():
+            item=PlaylistItem([folder['name']]);item.setData(ROLE+2,folder);item.setIcon(0,self.icon('SP_DirIcon'));folders[folder['id']]=item
+        for folder in self.catalogue.playlist_folders():
+            parent=folders.get(folder['parent_id'])
+            if parent:parent.addChild(folders[folder['id']])
+            else:self.playlist_list.addTopLevelItem(folders[folder['id']])
+        locations=self.catalogue.playlist_locations()
         for playlist in self.catalogue.playlists():
             choice=self.playlist_filter.currentIndex()
             if choice==1 and playlist["source"]!="manual" or choice==2 and playlist["source"]!="spotify" or choice==3 and not playlist["rekordbox_id"]:
@@ -999,14 +1029,21 @@ class Window(QMainWindow):
             label="Spotify linked" if playlist["source"]=="spotify" else "Local"
             if playlist["rekordbox_id"]:
                 label+=" · Rekordbox linked"
-            item=QListWidgetItem(f"{playlist['name']}\n{label} · {playlist['count']} tracks")
+            item=PlaylistItem([playlist['name']])
+            item.setToolTip(0,f"{label} · {playlist['count']} tracks")
             item.setData(ROLE,playlist)
-            item.setIcon(self.icon("SP_FileDialogListView"))
-            self.playlist_list.addItem(item)
+            item.setIcon(0,self.icon("SP_FileDialogListView"))
+            parent=folders.get(locations.get(playlist['id']))
+            if parent:parent.addChild(item)
+            else:self.playlist_list.addTopLevelItem(item)
             if playlist["id"]==previous:
                 self.playlist_list.setCurrentItem(item)
+        if selected_folder and not previous and selected_folder['id'] in folders:
+            self.playlist_list.setCurrentItem(folders[selected_folder['id']])
         if not self.playlist_list.currentItem() and self.playlist_list.count():
             self.playlist_list.setCurrentRow(0)
+        expanded=set(self.catalogue.get_setting('playlist_expanded',[]))
+        for id_,item in folders.items():item.setExpanded(id_ in expanded)
         del block
         self.refresh_entries()
 
@@ -1021,7 +1058,9 @@ class Window(QMainWindow):
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             control.setEnabled(manual)
             control.setVisible(manual)
-        self.review_button.setVisible(bool(playlist and playlist["source"]=="spotify" and entries))
+        review_count=len({e['spotify_id'] for e in entries if e['match_state']=='review' and e['spotify_id']})
+        self.review_button.setVisible(bool(review_count))
+        self.review_button.setText(f'Review needed ({review_count})…')
         self.queue_missing_button.setVisible(any(e["match_state"]=="missing" for e in entries))
         self.playlist_summary.setText(f"{playlist['name']} · {'Spotify membership and order' if playlist['source']=='spotify' else 'Local playlist'} · Rekordbox: {'linked' if playlist['rekordbox_id'] else 'not linked'}" if playlist else "Select a playlist")
 
@@ -1195,9 +1234,13 @@ class Window(QMainWindow):
             QMessageBox.information(self,"Scan issues","\n".join(result["errors"][:30]))
 
     def new_playlist(self):
+        item=self.playlist_list.currentItem();folder=item.data(ROLE+2) if item else None
         name,ok=QInputDialog.getText(self,"New local playlist","Playlist name")
         if ok and name.strip():
             self.playlist_id=self.catalogue.create_playlist(name)
+            if folder:
+                self.catalogue.move_playlist_item(self.playlist_id,folder['id'])
+                expanded=set(self.catalogue.get_setting('playlist_expanded',[]));expanded.add(folder['id']);self.catalogue.set_setting('playlist_expanded',sorted(expanded))
             self.refresh()
             self.navigation.setCurrentRow(3)
 
@@ -1459,12 +1502,24 @@ class Window(QMainWindow):
             QTimer.singleShot(250,self.start_downloads)
 
     def queue_missing(self):
+        skipped=0
         for entry in self.catalogue.entries(self.playlist_id) if self.playlist_id else []:
             if entry["spotify_id"] and entry["match_state"]=="missing":
-                self.catalogue.enqueue(entry["spotify_id"])
+                track=self.catalogue.remote_track(entry['spotify_id'])
+                if track and track['playable']:self.catalogue.enqueue(entry["spotify_id"])
+                else:skipped+=1
         self.refresh_downloads()
         self.navigation.setCurrentRow(1)
         self.download_tabs.setCurrentIndex(1)
+        if skipped:self.status.setText(f'{skipped} unavailable track(s) skipped')
+
+    def review_needed(self,all_playlists=False):
+        playlists=self.catalogue.playlists() if all_playlists else [{'id':self.playlist_id}] if self.playlist_id else []
+        ids=dict.fromkeys(e['spotify_id'] for p in playlists for e in self.catalogue.entries(p['id']) if e['match_state']=='review' and e['spotify_id'])
+        tracks=[self.catalogue.remote_track(id_) for id_ in ids]
+        if not tracks:self.status.setText('No tracks need review');return
+        MatchReview(self.catalogue,tracks,self).exec()
+        self.refresh_playlists();self.update_exports()
 
     def review_match(self):
         row=self.entries_table.currentRow()
@@ -1476,18 +1531,14 @@ class Window(QMainWindow):
         track=self.catalogue.remote_track(entry["spotify_id"])
         self.review_track(track)
 
+    def mark_entry_missing(self,entry):
+        self.catalogue.decide_match(entry['spotify_id'],None,'missing')
+        self.refresh_playlists();self.update_exports()
+
     def review_track(self,track):
-        self.catalogue.save_remote(track)
-        ranked=candidates(self.catalogue,track)
-        if not ranked:
-            QMessageBox.information(self,"Match review","No plausible local candidates. Scan more folders or queue this track.")
-            return
-        labels=[f"{c['score']:.0%} · {c['label']} · {c['evidence']}" for c in ranked]
-        label,ok=QInputDialog.getItem(self,"Confirm local recording",f"{track['artist']} — {track['title']}",labels,0,False)
-        if ok:
-            self.catalogue.decide_match(track["id"],ranked[labels.index(label)]["recording_id"])
-            self.refresh_entries()
-            self.update_exports()
+        if track:
+            MatchReview(self.catalogue,[track],self).exec()
+            self.refresh_playlists();self.update_exports()
 
     def save_common_options(self):
         options=self.catalogue.get_setting("zotify_options",{})
@@ -1797,18 +1848,63 @@ class Window(QMainWindow):
     def playlist_context(self,point):
         item=self.playlist_list.itemAt(point)
         if not item:
-            return
+            menu=QMenu(self);menu.addAction('New folder…',self.new_playlist_folder);menu.exec(self.playlist_list.viewport().mapToGlobal(point));return
         self.playlist_list.setCurrentItem(item)
+        folder=item.data(ROLE+2)
+        if folder:
+            menu=QMenu(self);menu.addAction('New subfolder…',self.new_playlist_folder)
+            menu.addAction('Rename folder…',lambda:self.rename_playlist_folder(folder))
+            menu.addAction('Move to top level',lambda:self.move_playlist_top(folder['id'],True))
+            menu.addAction('Remove folder (keep playlists)',lambda:self.remove_playlist_folder(folder))
+            menu.exec(self.playlist_list.viewport().mapToGlobal(point));return
         playlist=item.data(ROLE)
         menu=QMenu(self)
         menu.addAction("Rename playlist…",self.rename_current_playlist)
         menu.addAction("Send / resync to Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
+        menu.addAction('Move to top level',lambda:self.move_playlist_top(playlist['id']))
         if playlist["source"]=="spotify":
+            menu.addAction('Review needed tracks…',self.review_needed)
             menu.addAction("Sync from Spotify",self.sync_selected)
             menu.addAction("Make independent",self.detach_current)
         menu.addAction("Remove playlist",self.delete_current_playlist)
         menu.exec(self.playlist_list.viewport().mapToGlobal(point))
+
+    def playlist_drag_data(self):
+        item=self.playlist_list.currentItem()
+        if not item:return None
+        folder=item.data(ROLE+2);row=folder or item.data(ROLE)
+        if not row:return None
+        return {'kind':'playlist','scope':'local','workspace':str(self.catalogue.workspace),'id':row['id'],'folder':bool(folder)}
+
+    def save_playlist_expansion(self,*_):
+        expanded=[]
+        def visit(item):
+            folder=item.data(ROLE+2)
+            if folder and item.isExpanded():expanded.append(folder['id'])
+            for i in range(item.childCount()):visit(item.child(i))
+        for i in range(self.playlist_list.topLevelItemCount()):visit(self.playlist_list.topLevelItem(i))
+        self.catalogue.set_setting('playlist_expanded',expanded)
+
+    def new_playlist_folder(self):
+        item=self.playlist_list.currentItem();folder=item.data(ROLE+2) if item else None
+        name,ok=QInputDialog.getText(self,'New playlist folder','Name')
+        if ok and name.strip():
+            self.catalogue.create_playlist_folder(name,folder['id'] if folder else None)
+            if folder:
+                expanded=set(self.catalogue.get_setting('playlist_expanded',[]));expanded.add(folder['id']);self.catalogue.set_setting('playlist_expanded',sorted(expanded))
+            self.refresh_playlists()
+
+    def rename_playlist_folder(self,folder):
+        name,ok=QInputDialog.getText(self,'Rename folder','Name',text=folder['name'])
+        if ok and name.strip():self.catalogue.rename_playlist_folder(folder['id'],name);self.refresh_playlists()
+
+    def remove_playlist_folder(self,folder):
+        if QMessageBox.question(self,'Remove folder','Remove this folder? Playlists and subfolders will be kept.')==QMessageBox.StandardButton.Yes:
+            self.catalogue.remove_playlist_folder(folder['id']);self.refresh_playlists()
+
+    def move_playlist_top(self,id_,folder=False):
+        self.catalogue.move_playlist_item(id_,None,folder);self.refresh_playlists()
 
     def rename_current_playlist(self):
         if not self.playlist_id:return
@@ -1852,6 +1948,7 @@ class Window(QMainWindow):
         if entry["recording_id"]:menu.addAction("Play / preview",lambda:self.play_row(entry))
         if entry["spotify_id"]:
             menu.addAction("Review local match",self.review_match)
+            menu.addAction('Not in local library',lambda:self.mark_entry_missing(entry))
             if entry["match_state"]=="missing":
                 menu.addAction("Queue download",lambda:self.queue_one(entry["spotify_id"]))
         files=[file for file in self.catalogue.files() if file["recording_id"]==entry["recording_id"]]

@@ -212,6 +212,20 @@ class Rekordbox:
         if not name.strip():raise ValueError("Enter a name")
         return self.stage(f"Rename playlist/folder to {name}",lambda db:db.rename_playlist(self.playlist(db,id_),name.strip()))
 
+    def move_playlist(self,id_,parent=None):
+        def operation(db):
+            playlist=self.playlist(db,id_)
+            if parent:
+                folder=self.playlist(db,parent)
+                if folder.Attribute!=1:raise ValueError('Drop playlists into a folder')
+                ancestor=folder;seen=set()
+                while ancestor and ancestor.ID not in SPECIAL:
+                    if ancestor.ID==id_ or ancestor.ID in seen:raise ValueError('A folder cannot be moved into itself or its descendants')
+                    seen.add(ancestor.ID);ancestor=db.get_playlist(ID=ancestor.ParentID) if ancestor.ParentID else None
+            db.move_playlist(playlist,parent=parent or 'root')
+            return id_
+        return self.stage('Move playlist/folder',operation)
+
     def delete_playlist(self,id_):
         view=self.view();items={p["id"]:p for p in view["playlists"]}
         if id_ not in items or items[id_]["type"] not in {0,1}:raise ValueError("Select a regular playlist or folder")
