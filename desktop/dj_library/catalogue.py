@@ -106,6 +106,8 @@ class Catalogue:
                 CREATE TABLE IF NOT EXISTS changes(id TEXT PRIMARY KEY, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     action TEXT NOT NULL, timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS download_sources(download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+                    source_key TEXT NOT NULL,name TEXT NOT NULL,position INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(download_id,source_key));
                 CREATE TABLE IF NOT EXISTS playlist_folders(id TEXT PRIMARY KEY, name TEXT NOT NULL,
                     parent_id TEXT REFERENCES playlist_folders(id));
                 CREATE TABLE IF NOT EXISTS playlist_locations(playlist_id TEXT PRIMARY KEY REFERENCES playlists(id) ON DELETE CASCADE,
@@ -116,6 +118,16 @@ class Catalogue:
             version = db.execute("SELECT schema_version FROM workspace").fetchone()[0]
             if version != 2:
                 raise ValueError(f"Unsupported workspace version: {version}")
+            if 'queue_position' not in {row['name'] for row in db.execute('PRAGMA table_info(downloads)')}:
+                db.execute('ALTER TABLE downloads ADD COLUMN queue_position INTEGER NOT NULL DEFAULT 0')
+                for position,row in enumerate(db.execute('SELECT id FROM downloads ORDER BY created,id').fetchall()):
+                    db.execute('UPDATE downloads SET queue_position=? WHERE id=?',(position,row[0]))
+                for row in db.execute('SELECT DISTINCT d.id,p.id playlist_id,p.source,p.spotify_id,p.name,e.position FROM downloads d JOIN entries e ON e.spotify_id=d.spotify_id JOIN playlists p ON p.id=e.playlist_id'):
+                    key='spotify:playlist:'+row['spotify_id'] if row['source']=='spotify' else 'local:'+row['playlist_id']
+                    db.execute('INSERT OR IGNORE INTO download_sources VALUES (?,?,?,?)',(row['id'],key,row['name'],row['position']))
+            if 'finished_at' not in {row['name'] for row in db.execute('PRAGMA table_info(downloads)')}:
+                db.execute("ALTER TABLE downloads ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
+                db.execute("UPDATE downloads SET finished_at=created WHERE state='complete'")
         if not self.bindings_path.exists():
             atomic_json(self.bindings_path, {"roots": {}})
 
@@ -500,16 +512,25 @@ class Catalogue:
             db.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))
             self.change(db, "playlist", playlist_id, "delete")
 
-    def enqueue(self, spotify_id):
+    def enqueue(self, spotify_id,source=None):
         track = self.remote_track(spotify_id)
         if not track or not track["playable"]:
             raise ValueError("This track is unavailable for download")
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             existing = db.execute("SELECT id FROM downloads WHERE spotify_id=? AND state IN ('queued','running','paused')", (spotify_id,)).fetchone()
-            if existing:
-                return existing[0]
-            job_id = uid()
-            db.execute("INSERT INTO downloads(id,spotify_id,created) VALUES (?,?,?)", (job_id, spotify_id, now()))
+            if not existing:
+                failed=db.execute("SELECT id FROM downloads WHERE spotify_id=? AND state='failed' ORDER BY created DESC,id LIMIT 1",(spotify_id,)).fetchone()
+                if failed:
+                    existing=failed;db.execute("UPDATE downloads SET state='queued',progress=0,message='Ready to retry',output='' WHERE id=?",(failed[0],))
+            job_id=existing[0] if existing else uid()
+            if not existing:
+                position=db.execute('SELECT COALESCE(max(queue_position),-1)+1 FROM downloads').fetchone()[0]
+                db.execute("INSERT INTO downloads(id,spotify_id,created,queue_position) VALUES (?,?,?,?)", (job_id, spotify_id, now(),position))
+            sources=[source] if source else [dict(row) for row in db.execute('SELECT p.id,p.source,p.spotify_id,p.name,e.position FROM entries e JOIN playlists p ON p.id=e.playlist_id WHERE e.spotify_id=? ORDER BY p.name,e.position',(spotify_id,))]
+            for item in sources:
+                key=item.get('key') or ('spotify:playlist:'+item['spotify_id'] if item.get('source')=='spotify' else 'local:'+item['id'])
+                db.execute('INSERT OR IGNORE INTO download_sources VALUES (?,?,?,?)',(job_id,key,item['name'],item.get('position',0)))
             return job_id
 
     def missing_tracks(self):
@@ -521,13 +542,67 @@ class Catalogue:
 
     def download_jobs(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT d.*,t.title,t.artist,t.duration FROM downloads d JOIN remote_tracks t ON t.id=d.spotify_id ORDER BY d.created,d.id")]
+            sources={}
+            for row in db.execute("""SELECT s.*,COALESCE(p.name,s.name) display_name FROM download_sources s LEFT JOIN playlists p
+                ON s.source_key=CASE WHEN p.source='spotify' THEN 'spotify:playlist:'||p.spotify_id ELSE 'local:'||p.id END ORDER BY s.rowid"""):
+                sources.setdefault(row['download_id'],[]).append({'id':row['source_key'],'name':row['display_name'],'position':row['position']})
+            rows=[dict(row) for row in db.execute("""SELECT d.*,t.title,t.artist,t.duration FROM downloads d JOIN remote_tracks t ON t.id=d.spotify_id
+                ORDER BY CASE d.state WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 1 WHEN 'failed' THEN 1 ELSE 2 END,d.queue_position,d.created,d.id""")]
+            for row in rows:
+                row['sources']=sources.get(row['id'],[]);row['source_label']=' · '.join(s['name'] for s in row['sources']) or 'Direct downloads'
+            return rows
+
+    def claim_next_download(self):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM downloads WHERE state IN ('running','removing')").fetchone():return None
+            row=db.execute("SELECT id FROM downloads WHERE state IN ('queued','paused') ORDER BY queue_position,created,id LIMIT 1").fetchone()
+            if not row:return None
+            db.execute("UPDATE downloads SET state='running',progress=0,message='Connecting to Zotify' WHERE id=?",(row[0],))
+            id_=row[0]
+        return next(row for row in self.download_jobs() if row['id']==id_)
+
+    def remove_downloads(self,ids):
+        ids=list(dict.fromkeys(ids));running=[]
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for id_ in ids:
+                row=db.execute('SELECT state FROM downloads WHERE id=?',(id_,)).fetchone()
+                if not row:continue
+                if row[0] in {'running','removing'}:
+                    db.execute("UPDATE downloads SET state='removing',message='Removing' WHERE id=?",(id_,));running.append(id_)
+                else:db.execute('DELETE FROM downloads WHERE id=?',(id_,))
+        return running
+
+    def finish_queue_removals(self):
+        with self.connect() as db:db.execute("DELETE FROM downloads WHERE state='removing'")
+
+    def reorder_downloads(self,ids):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            pending=[r[0] for r in db.execute("SELECT id FROM downloads WHERE state IN ('queued','paused','failed') ORDER BY queue_position,created,id")]
+            if len(ids)!=len(set(ids)) or set(ids)!=set(pending):raise ValueError('The pending queue changed; try the move again')
+            for position,id_ in enumerate(ids):db.execute('UPDATE downloads SET queue_position=? WHERE id=?',(position,id_))
+
+    def move_downloads(self,ids,before=None):
+        pending=[r['id'] for r in self.download_jobs() if r['state'] in {'queued','paused','failed'}]
+        if not ids or not set(ids)<=set(pending):raise ValueError('Select pending tracks; the active download keeps its position')
+        moved=[id_ for id_ in pending if id_ in ids];remaining=[id_ for id_ in pending if id_ not in ids]
+        if before in moved:return
+        target=remaining.index(before) if before in remaining else len(remaining)
+        self.reorder_downloads(remaining[:target]+moved+remaining[target:])
+
+    def prioritise_sources(self,keys):
+        pending=[r for r in self.download_jobs() if r['state'] in {'queued','paused','failed'}];rank={key:i for i,key in enumerate(keys)}
+        def priority(row):return min((rank.get(s['id'],len(rank)) for s in row['sources']),default=rank.get('direct',len(rank)))
+        self.reorder_downloads([r['id'] for r in sorted(pending,key=priority)])
 
     def update_download(self, job_id, state=None, progress=None, message=None, output=None):
         values = {key: value for key, value in {"state": state, "progress": progress, "message": message, "output": output}.items() if value is not None}
+        if state=='complete':values['finished_at']=now()
         if values:
             with self.connect() as db:
-                db.execute("UPDATE downloads SET " + ",".join(key + "=?" for key in values) + " WHERE id=?", (*values.values(), job_id))
+                db.execute("UPDATE downloads SET " + ",".join(key + "=?" for key in values) + " WHERE id=? AND state!='removing'", (*values.values(), job_id))
 
 
 def read_metadata(path):

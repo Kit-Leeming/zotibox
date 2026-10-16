@@ -47,8 +47,8 @@ def main(arguments):
         def create_oauth(client_id):
             if login_errors:
                 raise LoginError(login_errors[-1])
-            redirect = f"http://127.0.0.1:4381/login"
-            return WorkerOAuth(client_id, redirect, emit).set_scopes(SCOPES)
+            redirect = f"http://{Zotify.CONFIG.get_oauth_address()}:{Zotify.CONFIG.get_oauth_port()}/login"
+            return WorkerOAuth(client_id, redirect, emit,timeout=Zotify.CONFIG.get_oauth_timeout() or 180).set_scopes(SCOPES)
         LoginHandler.create_oauth = staticmethod(create_oauth)
         from .zotify_login import install_login_adapter,failure_message
         install_login_adapter(LoginHandler,Zotify,create_oauth,emit)

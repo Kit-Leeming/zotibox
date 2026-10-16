@@ -4,10 +4,11 @@ import os
 import subprocess
 import sys
 import threading
+from html import escape
 from datetime import datetime,timedelta
 from pathlib import Path, PurePosixPath
-from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize, QPoint
-from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen
+from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings, QSignalBlocker, QLockFile, QUrl, QStandardPaths, QSize, QPoint,QItemSelectionModel
+from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen,QAction,QKeySequence
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
     QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider)
@@ -15,13 +16,14 @@ from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTab
 from .playlist_picker import choose_playlist
 from .playlist_tree import PlaylistTree,PlaylistItem
 from .match_review import MatchReview
+from .zotify_settings import ZotifySettings
 from .player import MusicPlayer
 from .artwork_async import ArtworkCache
 from .instance import acquire_lock
 from .file_actions import recycle
 from .catalogue import Catalogue
 from .branding import icon_image, save_icon
-from .themes import make_theme, valid_theme, stylesheet, RowDelegate, ThemeDialog, selection_brush
+from .themes import make_theme, valid_theme, stylesheet, RowDelegate,DownloadDelegate, ThemeDialog, selection_brush
 from .icons import icon as outline_icon
 from .spotify import Spotify, TokenStore, REDIRECT_URI, track_data,spotify_id
 from .matching import match_track,local_recordings,reclassify_reviews
@@ -115,6 +117,7 @@ class Window(QMainWindow):
         self.job=self.download_job=self.scan_job=None
         self.update_check_job=None
         self.close_pending=False
+        self.resume_after_removal=False
         self.queue_ids=set()
         self.playlist_id=None
         self.setWindowTitle("ZotiBox")
@@ -256,7 +259,7 @@ class Window(QMainWindow):
             "native_playlist":self.rb_panel.current_playlist() if native else None}
 
     def validate_drag(self,data):
-        if data.get('kind')=='playlist':raise ValueError('Drop playlists into a playlist folder')
+        if data.get('kind') in {'playlist','queue'}:raise ValueError('Drop this selection into its own playlist or queue area')
         if data.get("workspace")!=str(self.catalogue.workspace):raise ValueError("These tracks come from a different database")
         ids=data.get("recordings",[])
         if not isinstance(ids,list) or len(ids)>10000 or any(not isinstance(i,str) for i in ids):raise ValueError("Invalid track selection")
@@ -303,6 +306,8 @@ class Window(QMainWindow):
         self.recent_table.setDragEnabled(True);self.recent_table.drag_payload=lambda:self.drag_data([self.recent_table.item(i.row(),0).data(ROLE) for i in self.recent_table.selectionModel().selectedRows()])
         self.playlist_hover=HoverTabs(self.playlist_tabs)
         self.rb_panel.setup_dragdrop()
+        self.downloads_table.setDragEnabled(True);self.downloads_table.setAcceptDrops(True);self.downloads_table.setDropIndicatorShown(True)
+        self.downloads_table.drag_payload=self.queue_drag_data;self.downloads_table.drop_tracks=self.drop_queue
 
     def icon(self,name):
         return outline_icon(name,QColor(self.theme["foreground"]["start"]))
@@ -484,9 +489,9 @@ class Window(QMainWindow):
         for title,control in [("Format",self.codec),("Source quality",self.quality)]:
             options.addWidget(QLabel(title))
             options.addWidget(control)
-        options.addWidget(self.button("All Zotify settings…",self.zotify_settings,"SP_FileDialogDetailedView"))
+        options.addWidget(self.button("Zotify settings…",self.zotify_settings,"settings"))
         options.addStretch()
-        speed=muted("One active download · real-time speed")
+        speed=self.download_speed=muted("One active download · real-time pacing")
         speed.setWordWrap(False)
         options.addWidget(speed)
         layout.addLayout(options)
@@ -501,23 +506,36 @@ class Window(QMainWindow):
         actions=QHBoxLayout()
         self.download_buttons={}
         for text,action,icon in [("Queue selected",self.queue_results,"SP_ArrowDown"),("Start / resume queue",self.start_downloads,"SP_MediaPlay"),
-            ("Pause queue",self.pause_downloads,"SP_MediaPause"),("Retry failed",self.retry_downloads,"SP_BrowserReload")]:
+            ("Pause queue",self.pause_downloads,"SP_MediaPause"),("Retry failed",self.retry_downloads,"SP_BrowserReload"),
+            ('Download next',self.download_selected_next,'SP_ArrowUp'),('Move up',lambda:self.move_queue_selection(-1),'SP_ArrowUp'),
+            ('Move down',lambda:self.move_queue_selection(1),'SP_ArrowDown'),('Remove selected',self.remove_selected_downloads,'SP_DialogCancelButton')]:
             button=self.button(text,action,icon);self.download_buttons[text]=button;actions.addWidget(button)
         self.results_table.itemSelectionChanged.connect(self.update_download_controls)
         actions.addStretch()
         layout.addLayout(actions)
-        self.downloads_table=self.table(["Track","Artist","State","Progress","Details"])
+        self.downloads_table=self.table(['#',"Track","Artist",'Playlist / source',"State","Progress","Details"])
+        self.downloads_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.downloads_table.setItemDelegate(DownloadDelegate(self.downloads_table,lambda:self.theme))
         self.downloads_table.customContextMenuRequested.connect(self.downloads_context)
-        self.downloads_table.setColumnWidth(0,340)
-        self.downloads_table.setColumnWidth(1,220)
+        for i,width in enumerate([42,280,180,210,100,160]):self.downloads_table.setColumnWidth(i,width)
+        self.downloads_table.itemSelectionChanged.connect(self.update_download_controls)
+        remove=QAction(self.downloads_table);remove.setShortcut(QKeySequence('Delete'));remove.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        remove.triggered.connect(self.remove_selected_downloads);self.downloads_table.addAction(remove)
         self.download_tabs.addTab(self.downloads_table,"Download queue")
         self.queue_summary=muted("Queue empty")
         layout.addWidget(self.queue_summary)
+        row=QHBoxLayout()
+        for text,fn,icon in [('Playlist priority…',self.queue_playlist_priority,'SP_FileDialogListView'),
+                ('Clear finished',self.clear_finished_downloads,'SP_DialogCancelButton'),('Clear queue…',self.clear_download_queue,'SP_DialogCancelButton')]:
+            button=self.button(text,fn,icon);self.download_buttons[text]=button;row.addWidget(button)
+        row.addStretch();layout.addLayout(row)
         self.queue_progress=QProgressBar()
         self.queue_progress.setRange(0,1000)
-        self.queue_progress.setMinimumHeight(20)
-        layout.addWidget(self.queue_progress)
+        self.queue_progress.setMinimumHeight(10);self.queue_progress.setTextVisible(False);self.queue_progress.setObjectName('queueProgress')
+        self.queue_percent=muted('0% of queued audio')
+        row=QHBoxLayout();row.addWidget(self.queue_progress,1);row.addWidget(self.queue_percent);layout.addLayout(row)
         layout.addWidget(self.download_tabs,1)
+        self.download_tabs.currentChanged.connect(self.update_download_controls)
 
     def build_library(self):
         layout=self.page()
@@ -638,10 +656,12 @@ class Window(QMainWindow):
         self.settings_navigation.setObjectName("navigation")
         self.settings_navigation.setFixedWidth(210)
         self.settings_stack=QStackedWidget()
+        self.settings_icons=[]
         row.addWidget(self.settings_navigation)
         row.addWidget(self.settings_stack,1)
         layout.addLayout(row,1)
         def section(title,icon,description):
+            self.settings_icons.append(icon)
             self.settings_navigation.addItem(QListWidgetItem(self.icon(icon),title))
             scroll=QScrollArea()
             scroll.setWidgetResizable(True)
@@ -699,7 +719,8 @@ class Window(QMainWindow):
         self.client_edit.setPlaceholderText("Your developer Client ID — no client secret required")
         self.redirect=QLineEdit(REDIRECT_URI)
         self.redirect.setReadOnly(True)
-        second=QLineEdit("http://127.0.0.1:4381/login")
+        zotify_options=self.catalogue.get_setting('zotify_options',{})
+        second=self.zotify_redirect_reference=QLineEdit(f"http://{zotify_options.get('REDIRECT_ADDRESS','127.0.0.1')}:{zotify_options.get('REDIRECT_PORT',4381)}/login")
         second.setReadOnly(True)
         for title,control in [("Client ID",self.client_edit),("Playlist login redirect",self.redirect),("Zotify login redirect",second)]:
             spotify_form.addRow(title,control)
@@ -727,11 +748,14 @@ class Window(QMainWindow):
         self.zotify_status=muted("Zotify: not connected")
         form.addWidget(self.zotify_status)
         for actions in [[("Connect Zotify",self.connect_zotify),("Fresh Zotify login",lambda:self.connect_zotify(True)),('Open pending login',self.open_pending_login)],
-            [('Last download error…',self.last_download_error),('All Zotify settings…',self.zotify_settings)]]:
+            [('Last download error…',self.last_download_error),('Zotify settings…',self.zotify_settings)]]:
             bar=QHBoxLayout()
             for text,action in actions:bar.addWidget(self.button(text,action))
             bar.addStretch();form.addLayout(bar)
         form.addStretch()
+        self.zotify_settings_index=self.settings_stack.count()
+        form=section('Zotify','SP_MediaPlay','Downloader preferences, file naming, metadata, lyrics and connection options.')
+        self.zotify_panel=ZotifySettings(self);form.addWidget(self.zotify_panel)
         form=section("Database","SP_DialogOpenButton","Open, import or relocate your catalogue.")
         form.addWidget(QLabel("ZotiBox Database"))
         bar=QHBoxLayout()
@@ -971,6 +995,7 @@ class Window(QMainWindow):
             try:self.rb_panel.loaded(self.rb_panel.backend.view())
             except Exception as exc:self.rb_panel.summary.setText("Saved preview could not load: "+str(exc)+". Use Refresh or Discard preview.")
         with self.catalogue.connect() as db:
+            db.execute("DELETE FROM downloads WHERE state='removing'")
             db.execute("UPDATE downloads SET state='paused',message='Interrupted session; resume to retry' WHERE state='running'")
 
     def refresh(self):
@@ -1141,25 +1166,27 @@ class Window(QMainWindow):
     def update_download_controls(self):
         if not hasattr(self,"download_buttons"):return
         jobs=self.catalogue.download_jobs()
-        self.download_buttons["Queue selected"].setVisible(bool(self.results_table.selectionModel().selectedRows()))
+        self.download_buttons["Queue selected"].setVisible(self.download_tabs.currentIndex()==0 and bool(self.results_table.selectionModel().selectedRows()))
         self.download_buttons["Retry failed"].setVisible(any(j["state"]=="failed" for j in jobs))
         self.download_buttons["Pause queue"].setVisible(self.download_job is not None)
         self.download_buttons["Start / resume queue"].setVisible(self.download_job is None and any(j["state"] in {"queued","paused"} for j in jobs))
+        on_queue=self.download_tabs.currentIndex()==1;selected=self.selected_downloads()
+        pending=bool(selected and all(j['state'] in {'queued','paused','failed'} for j in selected))
+        for label in ['Download next','Move up','Move down']:self.download_buttons[label].setVisible(on_queue and pending)
+        self.download_buttons['Remove selected'].setVisible(on_queue and bool(selected))
+        self.download_buttons['Clear queue…'].setVisible(on_queue and bool(jobs))
+        self.download_buttons['Clear finished'].setVisible(on_queue and any(j['state'] in {'complete','cancelled'} for j in jobs))
+        sources={s['id'] for j in jobs if j['state'] in {'queued','paused','failed'} for s in j['sources']} | ({'direct'} if any(not j['sources'] and j['state'] in {'queued','paused','failed'} for j in jobs) else set())
+        self.download_buttons['Playlist priority…'].setVisible(on_queue and len(sources)>1)
 
     def refresh_downloads(self):
         jobs=self.catalogue.download_jobs()
         self.refresh_global_playlist_controls()
         self.update_download_controls()
-        recent=[j for j in reversed(jobs) if j["state"]=="complete" and j["output"]][:10]
+        recent=[j for j in sorted(jobs,key=lambda j:j['finished_at'] or j['created'],reverse=True) if j["state"]=="complete" and j["output"]][:10]
         self.fill_table(self.recent_table,recent,lambda i,r:[r["title"],r["artist"],Path(r["output"]).name])
         self.recent_table.setVisible(bool(recent));self.recent_empty.setVisible(not recent)
-        self.fill_table(self.downloads_table,jobs,lambda i,row:[row["title"],row["artist"],row["state"].capitalize(),f"{row['progress']:.0f}%",row["message"]])
-        for index,row in enumerate(jobs):
-            bar=QProgressBar()
-            bar.setRange(0,100)
-            bar.setValue(round(row["progress"]))
-            bar.setFormat("%p%")
-            self.downloads_table.setCellWidget(index,3,bar)
+        if not getattr(self.downloads_table,'_dragging',False):self.refresh_queue_table(jobs)
         active=[row for row in jobs if row["state"] in {"queued","paused","running"}]
         self.metrics["queue"].setText(str(len(active)))
         remaining=sum(row["duration"]*(1-min(100,max(0,row["progress"]))/100 if row["state"]=="running" else 1) for row in active)
@@ -1170,15 +1197,107 @@ class Window(QMainWindow):
         relevant=[row for row in jobs if row["id"] in self.queue_ids and row["state"] in {"queued","paused","running","complete"}]
         total=sum(row["duration"] for row in relevant)
         self.queue_progress.setValue(round(1000*(1-remaining/total)) if total else 0)
-        self.queue_progress.setFormat("%p% of queued audio")
+        self.queue_percent.setText(f'{self.queue_progress.value()/10:.0f}% of queued audio')
         current=next((row for row in active if row["state"]=="running"),None)
-        finish=(datetime.now()+timedelta(seconds=remaining)).strftime('%H:%M')
         running=self.download_job is not None and not self.engine.cancel.is_set()
-        estimate=f' · estimated finish {finish}' if running else ' · paused / waiting to start'
+        rate=float(self.catalogue.get_setting('zotify_options',{}).get('DOWNLOAD_RATE_LIMITER',1))
+        self.download_speed.setText('One active download · '+('real-time pacing' if rate==1 else 'no added pacing' if rate==0 else f'pacing ×{rate:g}'))
+        finish=(datetime.now()+timedelta(seconds=remaining*rate)).strftime('%H:%M')
+        estimate=(f' · estimated finish {finish}' if rate else ' · finish estimate unavailable with pacing disabled') if running else ' · paused / waiting to start'
         self.queue_summary.setText(f"{len(active)} track(s) remaining · ~{clock_duration(remaining)} audio time remaining{estimate}" + (f" · {current['title']} ({current['progress']:.0f}%)" if current else "") if active else "Queue complete" if relevant else "Queue empty")
 
     def selected_files(self):
         return [item.data(0,ROLE) for item in self.files_table.selectedItems() if (item.data(0,ROLE) or {}).get("kind")=="file"]
+
+    def selected_downloads(self):
+        return [self.downloads_table.item(index.row(),0).data(ROLE) for index in self.downloads_table.selectionModel().selectedRows() if self.downloads_table.item(index.row(),0)]
+
+    def refresh_queue_table(self,jobs):
+        table=self.downloads_table;selected={j['id'] for j in self.selected_downloads()}
+        current=table.item(table.currentRow(),0);current=current.data(ROLE)['id'] if current else None
+        scroll=table.verticalScrollBar().value();horizontal=table.horizontalScrollBar().value()
+        block=QSignalBlocker(table);table.clearSelection();jobs=[j for j in jobs if j['state']!='removing']
+        positions={j['id']:i+1 for i,j in enumerate(j for j in jobs if j['state'] in {'running','queued','paused','failed'})}
+        self.fill_table(table,jobs,lambda i,r:[positions.get(r['id'],''),r['title'],r['artist'],r['source_label'],r['state'].capitalize(),'',r['message']])
+        for row,job in enumerate(jobs):
+            table.item(row,5).setToolTip(f"{job['progress']:.0f}%")
+            if job['id'] in selected:table.selectionModel().select(table.model().index(row,0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
+            if job['id']==current:table.setCurrentCell(row,0,QItemSelectionModel.SelectionFlag.NoUpdate)
+        table.verticalScrollBar().setValue(scroll);table.horizontalScrollBar().setValue(horizontal);del block
+        self.update_download_controls()
+
+    def queue_drag_data(self):
+        selected=self.selected_downloads()
+        if not selected or any(j['state'] not in {'queued','paused','failed'} for j in selected):return None
+        return {'kind':'queue','workspace':str(self.catalogue.workspace),'jobs':[j['id'] for j in selected]}
+
+    def drop_queue(self,data,point):
+        if data.get('kind')!='queue' or data.get('workspace')!=str(self.catalogue.workspace):return False
+        try:
+            ids=data.get('jobs');known={j['id'] for j in self.catalogue.download_jobs()}
+            if not isinstance(ids,list) or not ids or not all(isinstance(id_,str) and id_ in known for id_ in ids):return False
+            row=self.downloads_table.rowAt(point.y());item=self.downloads_table.item(row,0) if row>=0 else None
+            target=item.data(ROLE) if item else None
+            if target and target['state']=='running':
+                target=next((j for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'}),None)
+            before=target['id'] if target and target['state'] in {'queued','paused','failed'} else None
+            self.catalogue.move_downloads(ids,before);self.refresh_downloads();return True
+        except Exception as exc:self.show_error(exc);return False
+
+    def move_queue_selection(self,direction):
+        try:
+            selected={j['id'] for j in self.selected_downloads()};order=[j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'}]
+            for i in (range(1,len(order)) if direction<0 else range(len(order)-2,-1,-1)):
+                other=i+direction
+                if order[i] in selected and order[other] not in selected:order[i],order[other]=order[other],order[i]
+            self.catalogue.reorder_downloads(order);self.refresh_downloads()
+        except Exception as exc:self.show_error(exc)
+
+    def download_selected_next(self):
+        ids=[j['id'] for j in self.selected_downloads()]
+        self.prioritise_download_ids(ids)
+
+    def prioritise_download_ids(self,ids):
+        try:
+            first=next((j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'} and j['id'] not in ids),None)
+            self.catalogue.move_downloads(ids,first);self.refresh_downloads();self.status.setText('Queue priority updated; the current download keeps running')
+        except Exception as exc:self.show_error(exc)
+
+    def queue_playlist_priority(self):
+        jobs=[j for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'}];sources={}
+        for job in jobs:
+            for source in job['sources'] or [{'id':'direct','name':'Direct downloads'}]:
+                item=sources.setdefault(source['id'],dict(source,count=0));item['count']+=1
+        dialog=QDialog(self);dialog.setWindowTitle('Playlist download priority');dialog.resize(560,480);layout=QVBoxLayout(dialog)
+        layout.addWidget(muted('Drag playlists into priority order, or use the arrows. Shared tracks download once; the first matching playlist sets their priority. The current download stays first.'))
+        listing=QListWidget();listing.setDragDropMode(QListWidget.DragDropMode.InternalMove);listing.setDefaultDropAction(Qt.DropAction.MoveAction);layout.addWidget(listing,1)
+        for source in sources.values():
+            item=QListWidgetItem(f"{source['name']} · {source['count']} tracks");item.setData(ROLE,source['id']);listing.addItem(item)
+        def move(direction):
+            row=listing.currentRow();target=row+direction
+            if row>=0 and 0<=target<listing.count():item=listing.takeItem(row);listing.insertItem(target,item);listing.setCurrentRow(target)
+        bar=QHBoxLayout();bar.addWidget(self.button('Move up',lambda:move(-1),'SP_ArrowUp'));bar.addWidget(self.button('Move down',lambda:move(1),'SP_ArrowDown'));bar.addStretch();layout.addLayout(bar)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel);buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+        if dialog.exec():
+            try:self.catalogue.prioritise_sources([listing.item(i).data(ROLE) for i in range(listing.count())]);self.refresh_downloads()
+            except Exception as exc:self.show_error(exc)
+
+    def remove_download_ids(self,ids):
+        running=self.catalogue.remove_downloads(ids)
+        if running and self.download_job:self.pause_downloads(resume_after_removal=not self.engine.cancel.is_set())
+        elif running:self.catalogue.finish_queue_removals()
+        self.refresh_downloads();self.status.setText(f'Removed {len(ids)} queue entries; downloaded files kept')
+
+    def remove_selected_downloads(self):
+        ids=[j['id'] for j in self.selected_downloads()]
+        if ids:self.remove_download_ids(ids)
+
+    def clear_download_queue(self):
+        ids=[j['id'] for j in self.catalogue.download_jobs()]
+        if ids and QMessageBox.question(self,'Clear download queue',f'Remove all {len(ids)} queue entries? The active download will stop. Downloaded music files will be kept.')==QMessageBox.StandardButton.Yes:self.remove_download_ids(ids)
+
+    def clear_finished_downloads(self):
+        self.remove_download_ids([j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'complete','cancelled'}])
 
     def file_selection(self):
         rows=self.selected_files()
@@ -1447,7 +1566,7 @@ class Window(QMainWindow):
         label=QLabel('<p>1. Open <a href="https://developer.spotify.com/dashboard">Spotify Developer Dashboard</a> and sign in.</p>'
             '<p>2. Create an app for your own use and select Web API. Development Mode requires the app owner to have Premium.</p>'
             '<p>3. In its settings, register both redirect URIs exactly:</p>'
-            '<p><b>http://127.0.0.1:4381/callback</b><br><b>http://127.0.0.1:4381/login</b></p>'
+            f'<p><b>http://127.0.0.1:4381/callback</b><br><b>{escape(self.zotify_redirect_reference.text())}</b></p>'
             '<p>4. Copy the <b>Client ID</b> into ZotiBox and save it. Do not enter a client secret.</p>'
             '<p>5. Connect Spotify for playlists and Zotify for downloads. Each may open a browser login.</p>'
             '<p>Sharing your developer app requires adding users in Users Management (currently up to five users). Other ZotiBox users can create and configure their own developer app.</p>')
@@ -1519,7 +1638,7 @@ class Window(QMainWindow):
                     if state=="review":
                         reviews.append(track)
                     elif track.get("playable",True) and state=="missing":
-                        self.catalogue.enqueue(track["id"])
+                        self.catalogue.enqueue(track["id"],track.get('_download_source'))
                         queued+=1
                         self.integration_event.emit("refresh","")
             return {"queued":queued,"reviews":reviews}
@@ -1528,7 +1647,7 @@ class Window(QMainWindow):
             if result["reviews"] and QMessageBox.question(self,"Possible existing tracks",
                 f"{len(result['reviews'])} track(s) have ambiguous local matches. Queue new downloads anyway? Choose No to review their local matches from the search results.")==QMessageBox.StandardButton.Yes:
                 for track in result["reviews"]:
-                    self.catalogue.enqueue(track["id"])
+                    self.catalogue.enqueue(track["id"],track.get('_download_source'))
                     count+=1
             self.status.setText(f"Queued {count} track(s)")
             self.download_tabs.setCurrentIndex(1 if count else 0)
@@ -1589,7 +1708,10 @@ class Window(QMainWindow):
 
     def queue_missing(self):
         tracks=self.catalogue.missing_tracks()
-        for track in tracks:self.catalogue.enqueue(track['id'])
+        pending={track['id'] for track in tracks}
+        for playlist in self.catalogue.playlists():
+            for entry in self.catalogue.entries(playlist['id']):
+                if entry['spotify_id'] in pending:self.catalogue.enqueue(entry['spotify_id']);pending.remove(entry['spotify_id'])
         self.refresh_downloads()
         self.status.setText(f'Queued {len(tracks)} missing track(s) across all playlists')
 
@@ -1626,57 +1748,9 @@ class Window(QMainWindow):
         self.catalogue.set_setting("zotify_options",options)
 
     def zotify_settings(self):
-        dialog=QDialog(self)
-        dialog.setWindowTitle("Zotify settings")
-        dialog.resize(950,660)
-        layout=QVBoxLayout(dialog)
-        search=self.search_bar("Filter settings")
-        layout.addWidget(search)
-        table=QTableWidget(0,3)
-        table.setHorizontalHeaderLabels(["Setting","Value","Control"])
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setColumnWidth(0,310)
-        table.setColumnWidth(1,300)
-        options=self.catalogue.get_setting("zotify_options",{})
-        definitions=schema()
-        managed=worker_config(self.catalogue,self.catalogue.workspace/".local"/"staging"/"job")
-        table.setRowCount(len(definitions))
-        editors={}
-        for index,(key,definition) in enumerate(definitions.items()):
-            label=QTableWidgetItem(key)
-            label.setFlags(label.flags()&~Qt.ItemFlag.ItemIsEditable)
-            table.setItem(index,0,label)
-            value=managed[key]
-            if definition["type"]=="bool":
-                editor=QComboBox()
-                editor.addItems(["True","False"])
-                editor.setCurrentText(str(value))
-            else:
-                editor=QLineEdit(str(value))
-            editor.setEnabled(key not in MANAGED)
-            table.setCellWidget(index,1,editor)
-            control=QTableWidgetItem("Managed by ZotiBox" if key in MANAGED else definition["type"])
-            control.setFlags(control.flags()&~Qt.ItemFlag.ItemIsEditable)
-            table.setItem(index,2,control)
-            editors[key]=editor
-        search.textChanged.connect(lambda text:[table.setRowHidden(i,text.casefold() not in table.item(i,0).text().casefold()) for i in range(table.rowCount())])
-        layout.addWidget(table)
-        layout.addWidget(muted("ZotiBox manages queue speed, output locations, credentials and playlist identity. Other supported settings remain editable."))
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
-        layout.addWidget(buttons)
-        def save():
-            try:
-                values={key:(editor.currentText() if isinstance(editor,QComboBox) else editor.text()) for key,editor in editors.items() if key not in MANAGED}
-                validated_options(values)
-                self.catalogue.set_setting("zotify_options",values)
-                self.codec.setCurrentText(values["DOWNLOAD_FORMAT"])
-                self.quality.setCurrentText(values["DOWNLOAD_QUALITY"])
-                dialog.accept()
-            except Exception as exc:
-                QMessageBox.warning(dialog,"Invalid setting",str(exc))
-        buttons.accepted.connect(save)
-        buttons.rejected.connect(dialog.reject)
-        dialog.exec()
+        self.navigation.setCurrentRow(4)
+        self.settings_navigation.setCurrentRow(self.zotify_settings_index)
+        self.zotify_panel.load()
 
     def connect_zotify(self,fresh=False):
         if self.job or self.download_job:
@@ -1708,20 +1782,26 @@ class Window(QMainWindow):
         self.download_job.start()
         self.update_download_controls()
 
-    def pause_downloads(self):
+    def pause_downloads(self,resume_after_removal=False):
+        self.resume_after_removal=resume_after_removal
         if self.download_job:
+            self.engine.cancel.set()
             threading.Thread(target=self.engine.stop,daemon=True).start()
             self.status.setText("Pausing queue…")
 
     def retry_downloads(self):
+        skipped=0
         for job in self.catalogue.download_jobs():
             if job["state"]=="failed":
-                self.catalogue.update_download(job["id"],state="queued",progress=0,message="Ready to retry")
+                try:self.catalogue.enqueue(job['spotify_id'])
+                except ValueError:skipped+=1
         self.refresh_downloads()
+        if skipped:self.status.setText(f'{skipped} unavailable track(s) could not be retried')
 
     def download_finished(self):
         self.download_job.deleteLater()
         self.download_job=None
+        self.pending_login=None
         self.refresh()
         try:
             self.update_exports()
@@ -1729,6 +1809,8 @@ class Window(QMainWindow):
             self.status.setText(f"Playlist export needs attention: {exc}")
 
         self.maybe_close()
+        resume=self.resume_after_removal;self.resume_after_removal=False
+        if resume and not self.close_pending and any(j['state'] in {'queued','paused'} for j in self.catalogue.download_jobs()):QTimer.singleShot(0,self.start_downloads)
 
     @Slot(str,object)
     def handle_integration_event(self,kind,value):
@@ -1795,7 +1877,7 @@ class Window(QMainWindow):
                 control.setIcon(outline_icon(name,QColor(self.theme["selection_text" if control.property("primary") else "foreground"]["start"])))
         for index,name in enumerate(["SP_ComputerIcon","SP_ArrowDown","SP_DirIcon","SP_FileDialogListView","settings"]):
             self.navigation.item(index).setIcon(self.icon(name))
-        for index,name in enumerate(["SP_DirIcon","SP_FileDialogDetailedView","SP_FileDialogContentsView","SP_ArrowDown","SP_DialogOpenButton","SP_BrowserReload","SP_FileDialogListView"]):
+        for index,name in enumerate(self.settings_icons):
             self.settings_navigation.item(index).setIcon(self.icon(name))
         def recolour_folder(item):
             if (item.data(0,ROLE) or {}).get("kind")=="folder":
@@ -1954,6 +2036,9 @@ class Window(QMainWindow):
         menu.addAction("Rename playlist…",self.rename_current_playlist)
         menu.addAction("Send / resync to Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
+        source_key='spotify:playlist:'+playlist['spotify_id'] if playlist['source']=='spotify' else 'local:'+playlist['id']
+        queued=[j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'} and any(s['id']==source_key for s in j['sources'])]
+        if queued:menu.addAction('Download queued tracks first',lambda:self.prioritise_download_ids(queued))
         menu.addAction('Move to top level',lambda:self.move_playlist_top(playlist['id']))
         if playlist["source"]=="spotify":
             menu.addAction('Review needed tracks…',self.review_needed)
@@ -2072,19 +2157,23 @@ class Window(QMainWindow):
         if row<0:
             return
         job=self.downloads_table.item(row,0).data(ROLE)
+        if not self.downloads_table.item(row,0).isSelected():self.downloads_table.selectRow(row)
+        selected=self.selected_downloads()
         menu=QMenu(self)
-        if job["state"] in {"queued","paused","failed"}:
-            menu.addAction("Cancel this queue entry",lambda:self.cancel_queue_entry(job["id"]))
+        if selected and all(j['state'] in {'queued','paused','failed'} for j in selected):
+            menu.addAction('Download selected next',self.download_selected_next)
+            menu.addAction('Move up',lambda:self.move_queue_selection(-1));menu.addAction('Move down',lambda:self.move_queue_selection(1))
+        menu.addAction(f'Remove selected ({len(selected)})',self.remove_selected_downloads)
+        if job['sources']:
+            for source in job['sources'][:10]:
+                ids=[j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'} and any(s['id']==source['id'] for s in j['sources'])]
+                if ids:menu.addAction('Download '+source['name']+' first',lambda ids=ids:self.prioritise_download_ids(ids))
         if job["output"]:
             menu.addAction("Show in File Explorer",lambda:self.explorer(job["output"]))
         menu.exec(self.downloads_table.viewport().mapToGlobal(point))
 
     def cancel_queue_entry(self,job_id):
-        current=next((job for job in self.catalogue.download_jobs() if job["id"]==job_id),None)
-        self.catalogue.update_download(job_id,state="cancelled",message="Cancelled by user")
-        if current and current["state"]=="running":
-            self.pause_downloads()
-        self.refresh_downloads()
+        self.remove_download_ids([job_id])
 
     def nativeEvent(self,event_type,message):
         hit=resize_hit(self,message)

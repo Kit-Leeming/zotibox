@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import math
+from string import Formatter
 from pathlib import Path
 
 from .catalogue import AUDIO_EXTENSIONS, file_hash, read_metadata, atomic_json
@@ -15,11 +17,21 @@ from .matching import match_track
 from .spotify import dpapi
 
 MANAGED = {"ROOT_PATH", "ROOT_PODCAST_PATH", "CREDENTIALS_LOCATION", "API_CREDENTIALS_LOCATION", "SAVE_CREDENTIALS",
-           "DOWNLOAD_RATE_LIMITER", "OPTIMIZED_DOWNLOADING", "DOWNLOAD_PARENT_ALBUM", "TEMP_DOWNLOAD_DIR", "OUTPUT",
-           "OUTPUT_SINGLE", "OUTPUT_ALBUM", "OUTPUT_PLAYLIST_EXT", "SONG_ARCHIVE_LOCATION", "DISABLE_SONG_ARCHIVE",
+           "DOWNLOAD_PARENT_ALBUM", "TEMP_DOWNLOAD_DIR", "SONG_ARCHIVE_LOCATION", "DISABLE_SONG_ARCHIVE",
            "DISABLE_DIRECTORY_ARCHIVES", "SKIP_EXISTING", "EXPORT_M3U8", "M3U8_LOCATION", "LYRICS_LOCATION",
-           "IMPORT_ZMD_LOCATION", "EXPORT_ZMD_LOCATION", "API_CLIENT_ID", "REDIRECT_ADDRESS", "REDIRECT_PORT", "CUSTOM_FFMEPG_ARGS",
+           "IMPORT_ZMD_LOCATION", "EXPORT_ZMD_LOCATION",
            "STANDARD_INTERFACE", "PRINT_SPLASH"}
+PATTERNS={'OUTPUT','OUTPUT_SINGLE','OUTPUT_ALBUM','OUTPUT_PLAYLIST_EXT','OUTPUT_LIKED_SONGS'}
+NAME_FIELDS={'artist','album','song_name','song_title','title','song_id','isrc','playlist','playlist_num','album_num'}
+
+
+def validate_pattern(value):
+    if not value:return value
+    if value.startswith(('/','\\')) or '\\' in value or ':' in value or any(part in {'.','..',''} for part in value.split('/')):
+        raise ValueError('Filename patterns must stay inside the download folder; use / for subfolders')
+    for literal,field,spec,conversion in Formatter().parse(value):
+        if field is not None and (field not in NAME_FIELDS or spec or conversion):raise ValueError('Unknown filename field or format: '+str(field))
+    return value
 
 
 def schema():
@@ -43,25 +55,33 @@ def validated_options(options):
             value = int(value)
         elif kind == "float":
             value = float(value)
+            if not math.isfinite(value):raise ValueError(f'{key} must be a finite number')
         else:
             value = str(value)
+        if key in PATTERNS:validate_pattern(value)
+        if key=='REDIRECT_PORT' and not 1<=value<=65535:raise ValueError('Redirect port must be between 1 and 65535')
+        if key=='REDIRECT_ADDRESS':
+            import ipaddress
+            if value!='localhost' and not (ipaddress.ip_address(value).version==4 and ipaddress.ip_address(value).is_loopback):raise ValueError('The login listener must use a local loopback address')
+        if key=='API_CLIENT_ID' and value and not re.fullmatch('[A-Za-z0-9]{32}',value):raise ValueError('Enter a valid Spotify Client ID, or leave it empty to use the Spotify account setting')
+        if key in {'DOWNLOAD_RATE_LIMITER','FETCH_TIMEOUT','FETCH_DELAY','RETRY_DELAY','RETRY_ATTEMPTS','BULK_WAIT_TIME','MAX_FILENAME_LENGTH'} and value<0:raise ValueError(f'{key} cannot be negative')
+        if key in {'REDIRECT_TIMEOUT','CHUNK_SIZE','SEARCH_QUERY_SIZE'} and value<=0:raise ValueError(f'{key} must be greater than zero')
         values[key] = value
     return values
 
 
-def worker_config(catalogue, stage):
+def worker_config(catalogue, stage,options=None):
     config = {key: value["default"] for key, value in schema().items()}
-    config["API_CLIENT_LEGACY"] = False
-    config.update(validated_options(catalogue.get_setting("zotify_options", {})))
+    config.update(API_CLIENT_LEGACY=False,DOWNLOAD_RATE_LIMITER=1.0,OPTIMIZED_DOWNLOADING=False,REDIRECT_ADDRESS='127.0.0.1',REDIRECT_PORT=4381,CUSTOM_FFMEPG_ARGS='')
+    config.update(validated_options(catalogue.get_setting("zotify_options", {}) if options is None else options))
     config.update({"ROOT_PATH": str(stage / "music"), "ROOT_PODCAST_PATH": str(stage / "music"),
         "CREDENTIALS_LOCATION": str(stage / "credentials.json"), "API_CREDENTIALS_LOCATION": str(stage / "api-credentials.json"),
-        "SAVE_CREDENTIALS": True, "DOWNLOAD_RATE_LIMITER": 1.0, "OPTIMIZED_DOWNLOADING": False,
+        "SAVE_CREDENTIALS": True,
         "DOWNLOAD_PARENT_ALBUM": False, "TEMP_DOWNLOAD_DIR": str(stage / "temp"), "OUTPUT": "{song_id}",
         "OUTPUT_SINGLE": "{song_id}", "DISABLE_SONG_ARCHIVE": True, "DISABLE_DIRECTORY_ARCHIVES": True,
         "SONG_ARCHIVE_LOCATION": str(stage / "archive"), "SKIP_EXISTING": True, "EXPORT_M3U8": False,
         "M3U8_LOCATION": str(stage), "LYRICS_LOCATION": str(stage / "music"), "EXPORT_ZMD_LOCATION": str(stage / "zmd"),
-        "IMPORT_ZMD_LOCATION": str(stage / "zmd"), "API_CLIENT_ID": catalogue.get_setting("spotify_client_id", ""),
-        "REDIRECT_ADDRESS": "127.0.0.1", "REDIRECT_PORT": 4381, "CUSTOM_FFMEPG_ARGS": "",
+        "IMPORT_ZMD_LOCATION": str(stage / "zmd"), "API_CLIENT_ID": config.get('API_CLIENT_ID') or catalogue.get_setting("spotify_client_id", ""),
         "STANDARD_INTERFACE": True, "PRINT_SPLASH": False, "DEBUG": False})
     return config
 
@@ -85,12 +105,20 @@ def safe_name(value):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")[:140] or "Track"
 
 
-def download_destination(music,track,audio):
-    stem=safe_name(track["artist"]+" - "+track["title"])
-    destination=music/(stem+audio.suffix.lower())
+def download_destination(music,track,audio,options=None,sources=None):
+    options=options or {};source=next(iter(sources or []),{})
+    kind='OUTPUT_ALBUM' if source.get('id','').startswith('spotify:album:') else 'OUTPUT_PLAYLIST_EXT' if source.get('id','').startswith(('spotify:playlist:','local:')) else 'OUTPUT_SINGLE'
+    pattern=options.get('OUTPUT') or options.get(kind) or '{artist} - {song_name}';validate_pattern(pattern)
+    fields={key:safe_name(str(value)) for key,value in {'artist':track.get('artist') or 'Unknown artist','album':track.get('album') or 'Unknown album',
+        'song_name':track['title'],'song_title':track['title'],'title':track['title'],'song_id':track.get('id',''),'isrc':track.get('isrc',''),
+        'playlist':source.get('name') or 'Downloads','playlist_num':source.get('position',0)+1,'album_num':source.get('position',0)+1}.items()}
+    relative='/'.join(safe_name(part) for part in pattern.format_map(fields).split('/'))
+    destination=music/(relative+audio.suffix.lower());stem=destination.stem;parent=destination.parent
+    if not destination.resolve().is_relative_to(music.resolve()):raise ValueError('The output path is outside the download folder')
+    parent.mkdir(parents=True,exist_ok=True)
     number=2
     while destination.exists() and file_hash(destination)!=file_hash(audio):
-        destination=music/(f"{stem} ({number})"+audio.suffix.lower())
+        destination=parent/(f"{stem} ({number})"+audio.suffix.lower())
         number+=1
     return destination
 
@@ -139,14 +167,14 @@ class DownloadEngine:
                 if name in data:
                     atomic_json(stage / name, data[name])
 
-    def invoke(self, stage, track_id=None, authenticate=False, job_id=None,fresh=False):
+    def invoke(self, stage, track_id=None, authenticate=False, job_id=None,fresh=False,options=None):
         staging_root=(self.catalogue.workspace/".local"/"staging").resolve()
         if stage.resolve()==staging_root or not stage.resolve().is_relative_to(staging_root):
             raise ValueError("Worker staging path is outside this database's staging folder")
         stage.mkdir(parents=True, exist_ok=True)
         if not fresh:self._credentials(stage)
         config = stage / "config.json"
-        atomic_json(config, worker_config(self.catalogue, stage))
+        config_values=worker_config(self.catalogue,stage,options);atomic_json(config,config_values)
         environment = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         environment["PATH"] = str(ffmpeg_path("ffmpeg").parent) + os.pathsep + environment.get("PATH", "")
         source_format = "unverified"
@@ -164,7 +192,7 @@ class DownloadEngine:
                 timed_out.set()
                 subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True,
                                creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
-        timer = threading.Timer(420, expire)
+        timer = threading.Timer(max(420,float(config_values['REDIRECT_TIMEOUT'])*2+60), expire)
         timer.daemon = True
         timer.start()
         for line in self.process.stdout:
@@ -174,7 +202,8 @@ class DownloadEngine:
                 continue  # Never show raw dependency logs that might contain login data.
             kind = message.get("event")
             if kind == "progress" and job_id:
-                self.catalogue.update_download(job_id, progress=message["percent"], message="Downloading · real-time speed")
+                rate=float(config_values['DOWNLOAD_RATE_LIMITER']);pacing='real-time pacing' if rate==1 else 'no added pacing' if rate==0 else f'pacing ×{rate:g}'
+                self.catalogue.update_download(job_id, progress=message["percent"], message='Downloading · '+pacing)
             elif kind == "auth_url":
                 if job_id:
                     self.catalogue.update_download(job_id,message="Waiting for browser login; return to Setup if needed")
@@ -216,6 +245,22 @@ class DownloadEngine:
         if resolved != staging_root and resolved.is_relative_to(staging_root):
             shutil.rmtree(resolved, ignore_errors=True)
 
+    def validate_audio(self,audio,seconds):
+        with self.process_lock:
+            if self.cancel.is_set():raise InterruptedError('Queue paused')
+            process=subprocess.Popen([str(ffmpeg_path('ffmpeg')),'-v','error','-i',str(audio),'-f','null','-'],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
+            self.process=process
+        try:
+            process.communicate(timeout=max(120,int(seconds)*2))
+            if self.cancel.is_set():raise InterruptedError('Queue paused')
+            if process.returncode:raise ValueError('Downloaded audio failed decode validation')
+        except subprocess.TimeoutExpired:
+            process.kill();process.communicate();raise ValueError('Audio validation timed out')
+        finally:
+            with self.process_lock:
+                if self.process is process:self.process=None
+
     def authenticate(self,fresh=False):
         import uuid
         stage = self.catalogue.workspace / ".local" / "staging" / ("login-" + str(uuid.uuid4()))
@@ -233,7 +278,7 @@ class DownloadEngine:
             while True:
                 if self.cancel.is_set():
                     break
-                job = next((row for row in self.catalogue.download_jobs() if row["state"] in {"queued", "paused"}), None)
+                job = self.catalogue.claim_next_download()
                 if job is None:
                     break
                 import uuid
@@ -257,8 +302,9 @@ class DownloadEngine:
                 self.event("refresh", "")
                 stage = self.catalogue.workspace / ".local" / "staging" / job["id"]
                 try:
+                    options=validated_options(self.catalogue.get_setting('zotify_options',{}))
                     self.cleanup(stage)
-                    source_format = self.invoke(stage, track["id"], job_id=job["id"])
+                    source_format = self.invoke(stage, track["id"], job_id=job["id"],options=options)
                     files = [path for path in (stage / "music").rglob("*") if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS]
                     if len(files) != 1:
                         raise RuntimeError("Zotify returned no single-track output; no file was added")
@@ -269,14 +315,11 @@ class DownloadEngine:
                     if track["isrc"] and metadata["isrc"] and track["isrc"].upper() != metadata["isrc"].upper():
                         raise ValueError("Downloaded ISRC does not match; output held for review")
                     self.catalogue.update_download(job["id"], message="Validating audio")
-                    flags = subprocess.CREATE_NO_WINDOW
-                    result = subprocess.run([str(ffmpeg_path("ffmpeg")), "-v", "error", "-i", str(audio), "-f", "null", "-"], capture_output=True, creationflags=flags, timeout=max(120, int(metadata["duration"]) * 2))
-                    if result.returncode:
-                        raise ValueError("Downloaded audio failed decode validation")
+                    self.validate_audio(audio,metadata['duration'])
                     music = Path(self.catalogue.get_setting("download_folder", str(self.catalogue.workspace / "Music"))).resolve()
                     music.mkdir(parents=True, exist_ok=True)
                     # The destination is one shared music store, independent of playlist names.
-                    destination = download_destination(music, track, audio)
+                    destination = download_destination(music, track, audio,options,job.get('sources'))
                     if destination.exists():
                         if file_hash(destination) != file_hash(audio):
                             raise ValueError("Destination exists with different content; nothing was replaced")
@@ -287,6 +330,7 @@ class DownloadEngine:
                                 shutil.copyfileobj(source,target)
                             if file_hash(audio)!=file_hash(partial):
                                 raise ValueError("Download copy checksum failed")
+                            if self.cancel.is_set():raise InterruptedError('Queue paused')
                             partial.rename(destination)
                         finally:
                             partial.unlink(missing_ok=True)
@@ -297,6 +341,12 @@ class DownloadEngine:
                     if len(lyrics) == 1 and not lyric_destination.exists():
                         with lyrics[0].open("rb") as source, lyric_destination.open("xb") as target:
                             shutil.copyfileobj(source, target)
+                    if options.get('ALBUM_ART_TO_FILE'):
+                        images=[p for p in (stage/'music').rglob('*') if p.is_file() and p.suffix.lower() in {'.jpg','.jpeg','.png','.webp'}]
+                        if len(images)==1:
+                            cover=destination.with_suffix(images[0].suffix.lower())
+                            if not cover.exists():
+                                with images[0].open('rb') as source,cover.open('xb') as target:shutil.copyfileobj(source,target)
                     root_id = next((root["id"] for root in self.catalogue.roots() if root["path"] and music.is_relative_to(Path(root["path"]).resolve())), None)
                     root_id = root_id or self.catalogue.add_root(music)
                     self.catalogue.index_file(destination, root_id, cancel=self.cancel)
@@ -309,8 +359,8 @@ class DownloadEngine:
                         message=f"Complete · {source_description(source_format)}", output=str(destination))
                     self.cleanup(stage)
                 except InterruptedError:
-                    current = next(row for row in self.catalogue.download_jobs() if row["id"] == job["id"])
-                    if current["state"] != "cancelled":
+                    current = next((row for row in self.catalogue.download_jobs() if row["id"] == job["id"]),None)
+                    if current and current["state"] not in {"cancelled","removing"}:
                         self.catalogue.update_download(job["id"], state="paused", message="Paused; resume to retry this track")
                     break
                 except Exception as exc:
@@ -318,9 +368,12 @@ class DownloadEngine:
                 finally:
                     if stage.exists():
                         self._credentials(stage, save=True)
+                        current=next((r for r in self.catalogue.download_jobs() if r['id']==job['id']),None)
+                        if current and current['state']=='removing':self.cleanup(stage)
                 self.event("refresh", "")
             return "Queue paused" if self.cancel.is_set() else "Queue finished"
         finally:
+            self.catalogue.finish_queue_removals()
             self.run_lock.release()
 
 

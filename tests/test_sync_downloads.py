@@ -68,11 +68,11 @@ def test_remove_folder_keeps_files_and_playlist_references(tmp_path):
     assert catalogue.files()[0]["recording_id"]==old_recording
     assert catalogue.available_recording(old_recording)
 
-def test_policy_cannot_be_overridden(tmp_path):
+def test_integration_paths_are_reserved_but_download_preferences_are_editable(tmp_path):
     catalogue=Catalogue(tmp_path/"database")
     catalogue.set_setting("zotify_options",{"DOWNLOAD_RATE_LIMITER":0,"ROOT_PATH":"elsewhere","DOWNLOAD_PARENT_ALBUM":True,"DOWNLOAD_FORMAT":"mp3"})
     config=worker_config(catalogue,tmp_path/"stage")
-    assert config["DOWNLOAD_RATE_LIMITER"]==1
+    assert config["DOWNLOAD_RATE_LIMITER"]==0
     assert config["DOWNLOAD_PARENT_ALBUM"] is False
     assert config["ROOT_PATH"]==str(tmp_path/"stage"/"music")
     assert config["DOWNLOAD_FORMAT"]=="mp3"

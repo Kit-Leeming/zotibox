@@ -140,6 +140,29 @@ class RowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class DownloadDelegate(RowDelegate):
+    """Paint progress over the same row background, with its label beside the bar."""
+    def __init__(self,view,get_theme,column=5):
+        super().__init__(view,get_theme);self.column=column
+
+    def paint(self,painter,option,index):
+        super().paint(painter,option,index)
+        if index.column()!=self.column:return
+        row=index.data(Qt.ItemDataRole.UserRole) or {};percent=max(0,min(100,float(row.get('progress',0))))
+        theme=self.get_theme();selected=bool(option.state & QStyle.StateFlag.State_Selected)
+        foreground=QColor(theme['selection_text' if selected else 'foreground']['start'])
+        label_width=option.fontMetrics.horizontalAdvance('100%')+12
+        rect=QRectF(option.rect);label=QRectF(rect.right()-label_width-8,rect.y(),label_width,rect.height())
+        bar=QRectF(rect.left()+10,rect.center().y()-3,max(4,label.left()-rect.left()-22),6)
+        painter.save();painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track=QColor(foreground);track.setAlpha(65);painter.setPen(Qt.PenStyle.NoPen);painter.setBrush(track);painter.drawRoundedRect(bar,3,3)
+        fill=QRectF(bar);fill.setWidth(bar.width()*percent/100)
+        painter.setBrush(foreground if selected else selection_brush(theme['accent'],bar))
+        if percent:painter.drawRoundedRect(fill,3,3)
+        painter.setFont(option.font);painter.setPen(foreground);painter.drawText(label,Qt.AlignmentFlag.AlignVCenter|Qt.AlignmentFlag.AlignRight,f'{percent:.0f}%')
+        painter.restore()
+
+
 def stylesheet(theme):
     t = {key: css(theme[key]) for key in ROLES}
     return f"""
@@ -180,6 +203,7 @@ def stylesheet(theme):
         QCheckBox {{ spacing:8px; }}
         QProgressBar {{ border:0; background:{t['surface']}; border-radius:3px; }}
         QProgressBar::chunk {{ background:{t['accent']}; }}
+        QProgressBar#queueProgress {{border:1px solid {t['border']};border-radius:4px;}}
         QScrollArea {{ background:transparent; border:0; }}
         QScrollBar:vertical {{ background:{t['surface']}; width:14px; }}
         QScrollBar::handle:vertical {{ background:{t['muted']}; border:3px solid {t['surface']}; border-radius:6px; min-height:30px; }}

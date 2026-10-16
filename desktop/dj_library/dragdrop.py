@@ -19,8 +19,10 @@ class DragMixin:
         if not payload:return
         mime=QMimeData();mime.setData(MIME,json.dumps(payload).encode())
         drag=QDrag(self);drag.setMimeData(mime)
-        action=Qt.DropAction.MoveAction if payload.get('kind')=='playlist' else Qt.DropAction.CopyAction
-        drag.exec(Qt.DropAction.CopyAction|Qt.DropAction.MoveAction,action)
+        action=Qt.DropAction.MoveAction if payload.get('kind') in {'playlist','queue'} else Qt.DropAction.CopyAction
+        self._dragging=True
+        try:drag.exec(Qt.DropAction.CopyAction|Qt.DropAction.MoveAction,action)
+        finally:self._dragging=False
     def dragEnterEvent(self,event):
         if decode(event.mimeData()) and getattr(self,'drop_tracks',None):event.acceptProposedAction()
         else:event.ignore()

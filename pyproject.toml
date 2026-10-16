@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zotibox"
-version = "0.9.0"
+version = "0.10.0"
 description = "Portable Windows DJ library workspace"
 requires-python = ">=3.12"
 dependencies = ["PySide6>=6.8,<7", "mutagen>=1.47,<2", "requests>=2.32,<3", "pyrekordbox==0.4.4", "sqlcipher3-wheels==0.5.7", "psutil>=7,<8", "zotify @ git+https://github.com/ZahBoy/zotify.git@c77bfe3c3fe96a471e49d1ec449df764378fd12e", "librespot @ git+https://github.com/Googolplexed0/librespot-python.git@01abfc8ad012dbc40e90417e640faaf271ea2f98"]

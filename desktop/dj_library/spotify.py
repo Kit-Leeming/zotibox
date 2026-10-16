@@ -237,7 +237,8 @@ class Spotify:
             if kind == "track":
                 return [track_data(self.request(f"tracks/{item_id}"))]
             if kind == "playlist":
-                return self.snapshot(item_id, cancel)["tracks"]
+                snapshot=self.snapshot(item_id,cancel)
+                return [dict(track,_download_source={'key':'spotify:playlist:'+item_id,'name':snapshot['name'],'position':i}) for i,track in enumerate(snapshot['tracks'])]
             album = self.request(f"albums/{item_id}")
             items = self.pages(f"albums/{item_id}/tracks", {"limit": 50}, cancel)
             # Fetch full track objects individually for ISRC and release identity.
@@ -247,6 +248,7 @@ class Spotify:
                     raise InterruptedError("Album fetch cancelled")
                 track = track_data(self.request(f"tracks/{item['id']}"))
                 track["album"] = album["name"]
+                track['_download_source']={'key':'spotify:album:'+item_id,'name':album['name'],'position':len(tracks)}
                 tracks.append(track)
             return tracks
         raise ValueError("Enter a Spotify track, album or playlist URL")

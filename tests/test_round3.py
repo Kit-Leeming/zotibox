@@ -60,7 +60,7 @@ def test_oauth_decline_timeout_and_state_validation(monkeypatch):
 def test_local_update_versions_and_no_downgrade(tmp_path):
     for name in ["ZotiBox-Setup-0.3.0.exe","ZotiBox-Setup-0.10.0.exe","ZotiBox-Setup-0.4.0.exe","other.exe"]:
         (tmp_path/name).write_bytes(b"test")
-    assert find_update(tmp_path)["version"]=="0.10.0"
+    assert find_update(tmp_path,current='0.2.0')["version"]=="0.10.0"
     assert find_update(tmp_path,"0.10.0") is None
 
 

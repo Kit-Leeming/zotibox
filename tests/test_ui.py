@@ -149,7 +149,7 @@ def test_custom_bright_cyan_has_readable_derived_text():
 def test_grouped_settings_theme_samples_and_queue_progress(application,tmp_path):
     from test_sync_downloads import remote
     window=Window(tmp_path/"database")
-    assert window.settings_stack.count()==7
+    assert any(window.settings_navigation.item(i).text()=='Zotify' for i in range(window.settings_navigation.count()))
     assert window.theme_samples.count()==12
     window.choose_theme_preset("Northern lights")
     assert window.theme["background"]["gradient"]
@@ -163,7 +163,9 @@ def test_grouped_settings_theme_samples_and_queue_progress(application,tmp_path)
     window.refresh_downloads()
     assert "1:30" in window.queue_summary.text()
     assert window.queue_progress.value()==250
-    assert window.downloads_table.cellWidget(0,3).value()==25
+    assert window.downloads_table.cellWidget(0,5) is None
+    assert window.downloads_table.item(0,5).toolTip()=='25%'
+    assert not window.queue_progress.isTextVisible()
     window.close()
 
 

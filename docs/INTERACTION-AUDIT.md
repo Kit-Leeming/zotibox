@@ -57,3 +57,23 @@ databases cover these flows, with physical drag testing left for the installed b
 
 Token handling follows [Spotify's PKCE guidance](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
 and [refresh-token guidance](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens).
+
+## 0.10 queue and preferences
+
+- Queue entries have persisted positions and playlist/album source labels. Track drags, arrows,
+  Download next, playlist context actions and a source-priority dialog change pending order.
+  Shared tracks remain single queue entries, and the active track is not reordered.
+- Removal deletes entries. An active removal stops the owned worker/validator, hides the row while
+  draining, then deletes it; the remaining queue resumes unless the user paused it. Clearing the
+  queue and clearing finished entries preserve downloaded music and catalogue identities.
+- Worker claims and removals are serialized in SQLite. Progress/completion cannot resurrect a
+  removing row. Source associations cascade on deletion; startup finishes interrupted removals.
+- Selection and scroll positions survive progress refreshes. Right-click preserves existing
+  multi-selection. Inline progress drawing shares the row background; percentage text sits beside
+  the bar. Overall progress uses a separate label. Finished timestamps preserve recent-download order.
+- Settings → Zotify replaces the modal settings grid. Search/categories expose pacing, optimisation,
+  final filename patterns/subfolders, FFmpeg arguments and connection preferences. Integration-only
+  paths explain their purpose. Worker output stays isolated for validation; final naming is applied
+  inside the selected destination without replacing existing music. Current jobs keep their options.
+- Old queues upgrade in place with their previous order and inferred playlist sources. Public
+  screenshots use generated demo data. Physical drag interactions still need installed-app validation.

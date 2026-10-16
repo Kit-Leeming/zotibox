@@ -24,6 +24,8 @@ Screenshots use generated demo data.
 
 ![Download queue with remaining audio time and estimated finish](docs/images/downloads.png)
 
+![Zotify settings with editable audio options](docs/images/zotify-settings.png)
+
 </details>
 
 ## Install
@@ -50,11 +52,15 @@ Paste a Spotify playlist into search to create a new sync. Spotify controls link
 
 **Sync with Rekordbox** lets you choose multiple playlists to create or update. Missing files are skipped, including when creating an empty playlist; sync again after downloading. Rekordbox changes stay in a preview until Apply. Single-playlist sync is available from its right-click menu.
 
+In **Downloads → Download queue**, drag pending tracks to reorder, choose **Download next**, or use **Playlist priority** to move whole playlists ahead. Shared tracks download once. Right-click actions apply to the selected rows; **Remove selected** removes entries, and **Clear queue** removes the whole list while keeping downloaded music. Removing the active entry stops it and resumes the remaining queue unless paused.
+
+**Settings → Zotify** provides searchable audio, filename, metadata, lyrics and connection preferences. Filename patterns support subfolders, such as `{artist}/{album}/{song_name}`. Preferences apply to subsequent downloads; credential storage and verified staging stay within the app’s integration.
+
 ## Backups and current limits
 
 - Rekordbox can stay open for viewing and preparing previews. Close it before Backup, Apply or Restore. Database writes are disabled initially; every Apply and Restore creates a verified backup. External music files are not included in those backups.
 - Track identities, existing cues and analysis data are preserved where possible. New tracks need Rekordbox analysis. Cue markers are read-only, and metadata edits affect the Rekordbox database rather than audio-file tags.
-- Zotify downloads one track at a time at real-time speed. Finish times are estimates and exclude login, conversion and retry delays. FLAC output alone does not prove lossless audio; source-format information appears in the queue and file details.
+- Zotify downloads one track at a time, with real-time pacing by default. Pacing is adjustable in Zotify settings. Finish estimates exclude login, conversion and retry delays, and are hidden when pacing is disabled. FLAC output alone does not prove lossless audio; source-format information appears in the queue and file details.
 - Spotify playlist folders are unavailable through the Web API. ZotiBox provides its own folders. Automatic PC-to-PC sync is not included; manual `.zotibox` export/import is available.
 
 Zotify integration uses the [ZahBoy fork](https://github.com/ZahBoy/zotify). Dependency licences and attribution are listed in [third-party notices](THIRD-PARTY-NOTICES.md).
