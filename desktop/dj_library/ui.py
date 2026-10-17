@@ -231,7 +231,7 @@ class Window(QMainWindow):
             if not path:raise ValueError("Download or match a local file before playback")
             native=next((t for t in self.rb_panel.data["tracks"] if os.path.normcase(t["path"])==os.path.normcase(str(path))),None)
             cues=row.get("cues",native.get("cues",[]) if native else [])
-            self.player.load(path,f"{row.get('artist','')} — {row.get('title',Path(path).stem)}",cues)
+            self.player.load(path,f"{row.get('artist','')} — {row.get('title',Path(path).stem)}",cues,analysis=(native or row).get('analysis_paths',()))
         except Exception as exc:self.show_error(exc)
 
     def recent_context(self,point):
@@ -283,17 +283,19 @@ class Window(QMainWindow):
             if not item:return False
             playlist=item.data(ROLE)
             if not playlist:return False
-            if playlist["source"]!="manual":raise ValueError("Spotify controls this playlist. Drop into an independent local playlist instead.")
+            if playlist['source']=='spotify' and not ids:raise ValueError('Spotify controls its songs. Drop available local tracks to add local extras.')
             if not on_list and data.get("playlist")==playlist["id"] and data.get("entries"):
                 existing=[r["id"] for r in self.catalogue.entries(playlist["id"])]
                 moved=[i for i in existing if i in data["entries"]]
-                target=self.entries_table.rowAt(point.y());target=target if target>=0 else len(existing)
+                target=self.entries_table.insertion_row(point)
                 position=len([i for i in existing[:target] if i not in moved]);remaining=[i for i in existing if i not in moved]
                 self.catalogue.reorder(playlist["id"],remaining[:position]+moved+remaining[position:])
             else:
                 if not ids:raise ValueError("Scan these tracks into Local Music before adding to a local playlist")
                 self.catalogue.add_entries(playlist["id"],ids)
-            self.playlist_id=playlist["id"];self.refresh_playlists();self.status.setText("Playlist updated");return True
+            self.playlist_id=playlist["id"];self.refresh_playlists()
+            if not on_list and data.get('playlist')==playlist['id']:self.entries_table.restore_drag_selection(data.get('entries',[]))
+            self.status.setText("Playlist updated");return True
         except Exception as exc:self.show_error(exc);return False
 
     def setup_dragdrop(self):
@@ -410,6 +412,7 @@ class Window(QMainWindow):
         table=TrackTable(0,len(columns))
         table.setHorizontalHeaderLabels(columns)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.verticalHeader().hide()
         table.verticalHeader().setDefaultSectionSize(self.catalogue.get_setting("row_height",40))
@@ -745,6 +748,11 @@ class Window(QMainWindow):
         self.auto_download.setChecked(self.catalogue.get_setting("auto_download",False))
         self.auto_download.toggled.connect(lambda value:self.catalogue.set_setting("auto_download",value))
         form.addWidget(self.auto_download)
+        form.addWidget(QLabel('When a FLAC request has only a lossy source'))
+        self.lossy_fallback=QComboBox();self.lossy_fallback.addItem('MP3 320 kbps — DJ compatibility','mp3');self.lossy_fallback.addItem('Original format — no additional lossy encoding','native')
+        self.lossy_fallback.setCurrentIndex(max(0,self.lossy_fallback.findData(self.catalogue.get_setting('lossy_fallback','mp3'))))
+        self.lossy_fallback.currentIndexChanged.connect(lambda _:self.catalogue.set_setting('lossy_fallback',self.lossy_fallback.currentData()))
+        form.addWidget(self.lossy_fallback);form.addWidget(muted('MP3 conversion adds another lossy encoding step. Neither fallback is labelled lossless. Applies to subsequent downloads.'))
         self.zotify_status=muted("Zotify: not connected")
         form.addWidget(self.zotify_status)
         for actions in [[("Connect Zotify",self.connect_zotify),("Fresh Zotify login",lambda:self.connect_zotify(True)),('Open pending login',self.open_pending_login)],
@@ -814,7 +822,7 @@ class Window(QMainWindow):
         self.rb_write.setChecked(self.catalogue.get_setting("rekordbox_write_enabled",False))
         self.rb_write.toggled.connect(self.enable_rb_write)
         form.addWidget(self.rb_write)
-        form.addWidget(muted("A verified backup of the complete Rekordbox data directory is mandatory before every Apply or Restore. External music files are not included."))
+        form.addWidget(muted("Apply reuses its verified backup while Rekordbox matches the last ZotiBox apply. External changes require a new backup. Restore always creates one. Music files are not included."))
         bar=QHBoxLayout()
         bar.addWidget(self.button("Back up now",self.backup_rb,"SP_DialogSaveButton"))
         bar.addWidget(self.button("Open backups folder",lambda:self.explorer(self.rb_panel.backend.root/"backups",False),"SP_DirOpenIcon"))
@@ -1141,16 +1149,16 @@ class Window(QMainWindow):
         self.playlist_id=playlist["id"] if playlist else None
         entries=self.catalogue.entries(self.playlist_id) if self.playlist_id else []
         self.fill_table(self.entries_table,entries,lambda i,row:[str(i+1),row["title"],row["artist"],duration(row["duration"]),
-            row["match_state"].capitalize() if row["spotify_id"] else ("Available" if self.catalogue.available_recording(row["recording_id"]) else "Missing")])
+            row["match_state"].capitalize() if row["spotify_id"] else (("Local extra · " if playlist and playlist['source']=='spotify' else '')+("Available" if self.catalogue.available_recording(row["recording_id"]) else "Missing"))])
         manual=bool(playlist and playlist["source"]=="manual")
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             control.setEnabled(manual)
-            control.setVisible(manual)
+            control.setVisible(False)
         review_count=len({e['spotify_id'] for e in entries if e['match_state']=='review' and e['spotify_id']})
         self.review_button.setVisible(bool(review_count))
         self.review_button.setText(f'Review needed ({review_count})…')
         self.refresh_global_playlist_controls()
-        self.playlist_summary.setText(f"{playlist['name']} · {'Spotify membership and order' if playlist['source']=='spotify' else 'Local playlist'} · Rekordbox: {'linked' if playlist['rekordbox_id'] else 'not linked'}" if playlist else "Select a playlist")
+        self.playlist_summary.setText(f"{playlist['name']} · {'Spotify order + local extras' if playlist['source']=='spotify' else 'Local playlist'} · Rekordbox: {'linked' if playlist['rekordbox_id'] else 'not linked'}" if playlist else "Select a playlist")
 
     def refresh_global_playlist_controls(self):
         missing=len(self.catalogue.missing_tracks());self.queue_missing_button.setVisible(bool(missing))
@@ -1236,7 +1244,7 @@ class Window(QMainWindow):
         try:
             ids=data.get('jobs');known={j['id'] for j in self.catalogue.download_jobs()}
             if not isinstance(ids,list) or not ids or not all(isinstance(id_,str) and id_ in known for id_ in ids):return False
-            row=self.downloads_table.rowAt(point.y());item=self.downloads_table.item(row,0) if row>=0 else None
+            row=self.downloads_table.insertion_row(point);item=self.downloads_table.item(row,0) if row<self.downloads_table.rowCount() else None
             target=item.data(ROLE) if item else None
             if target and target['state']=='running':
                 target=next((j for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'}),None)
@@ -1440,11 +1448,11 @@ class Window(QMainWindow):
         rows=self.selected_files()
         if not rows:
             return
-        playlists=[p for p in self.catalogue.playlists() if p["source"]=="manual"]
+        playlists=self.catalogue.playlists()
         def create(name):
             id_=self.catalogue.create_playlist(name)
             return next(p for p in self.catalogue.playlists() if p["id"]==id_)
-        choice=choose_playlist(playlists,self,"Add to local playlist",create=create)
+        choice=choose_playlist(playlists,self,"Add to playlist (Spotify links keep local extras)",create=create)
         if choice:
             self.catalogue.add_entries(choice["id"],list(dict.fromkeys(row["recording_id"] for row in rows)))
             self.refresh_playlists()
@@ -1946,6 +1954,8 @@ class Window(QMainWindow):
         self.client_edit.setText(catalogue.get_setting("spotify_client_id",""))
         self.download_folder.setText(catalogue.get_setting("download_folder",str(catalogue.workspace/"Music")))
         self.apply_theme(catalogue.get_setting("theme",make_theme()))
+        if hasattr(self,'zotify_panel'):self.zotify_panel.load()
+        with QSignalBlocker(self.lossy_fallback):self.lossy_fallback.setCurrentIndex(max(0,self.lossy_fallback.findData(catalogue.get_setting('lossy_fallback','mp3'))))
         if self.remember:
             QSettings().setValue("database",str(catalogue.workspace))
         self.refresh()
@@ -2034,13 +2044,15 @@ class Window(QMainWindow):
         playlist=item.data(ROLE)
         menu=QMenu(self)
         menu.addAction("Rename playlist…",self.rename_current_playlist)
-        menu.addAction("Send / resync to Rekordbox…",self.rb_panel.sync_local)
+        menu.addAction("Link / sync with Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
         source_key='spotify:playlist:'+playlist['spotify_id'] if playlist['source']=='spotify' else 'local:'+playlist['id']
         queued=[j['id'] for j in self.catalogue.download_jobs() if j['state'] in {'queued','paused','failed'} and any(s['id']==source_key for s in j['sources'])]
         if queued:menu.addAction('Download queued tracks first',lambda:self.prioritise_download_ids(queued))
         menu.addAction('Move to top level',lambda:self.move_playlist_top(playlist['id']))
         if playlist["source"]=="spotify":
+            menu.addAction('Local files in Spotify / phone…',self.local_spotify_help)
+            menu.addAction('Export local extras for phone…',self.export_local_extras)
             menu.addAction('Review needed tracks…',self.review_needed)
             menu.addAction("Sync from Spotify",self.sync_selected)
             menu.addAction("Make independent",self.detach_current)
@@ -2119,6 +2131,8 @@ class Window(QMainWindow):
         row=self.entries_table.rowAt(point.y())
         if row<0:
             return
+        if not self.entries_table.item(row,0).isSelected():self.entries_table.selectRow(row)
+        self.entries_table.setCurrentCell(row,0,QItemSelectionModel.SelectionFlag.NoUpdate)
         self.entries_table.selectRow(row)
         entry=self.entries_table.item(row,0).data(ROLE)
         menu=QMenu(self)
@@ -2134,11 +2148,30 @@ class Window(QMainWindow):
             menu.addAction("File details",lambda:self.show_file_details(file))
             menu.addAction("Show in File Explorer",lambda:self.explorer(self.catalogue.resolve(file)))
         menu.addAction("Export playlist",self.export_playlist)
+        playlist=next((p for p in self.catalogue.playlists() if p['id']==self.playlist_id),None)
+        if playlist and (playlist['source']=='manual' or not entry['spotify_id']):
+            menu.addAction('Move up',lambda:self.move_entry(-1));menu.addAction('Move down',lambda:self.move_entry(1))
+            menu.addAction('Remove from playlist',self.remove_entry)
         menu.exec(self.entries_table.viewport().mapToGlobal(point))
 
     def queue_one(self,track_id):
         self.catalogue.enqueue(track_id)
         self.refresh_downloads()
+
+    def local_spotify_help(self):
+        from .phone_export import INSTRUCTIONS
+        QMessageBox.information(self,'Local files in Spotify',INSTRUCTIONS)
+
+    def export_local_extras(self):
+        try:
+            if not self.playlist_id:return
+            from .phone_export import export_extras
+            destination,_=QFileDialog.getSaveFileName(self,'Export local extras for phone','Local extras.zip','ZIP (*.zip)')
+            if not destination:return
+            playlist_id=self.playlist_id
+            self.start_job('Exporting local extras',lambda progress,cancel:export_extras(self.catalogue,playlist_id,destination),
+                lambda result:QMessageBox.information(self,'Local extras exported',f"{result['files']} file(s) copied unchanged. {len(result['missing'])} unavailable.\nExtract the ZIP and follow Spotify local files.txt to transfer them to your phone."),False)
+        except Exception as exc:self.show_error(exc)
 
     def results_context(self,point):
         row=self.results_table.rowAt(point.y())

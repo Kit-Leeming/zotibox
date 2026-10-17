@@ -316,9 +316,11 @@ class Catalogue:
 
     def add_entries(self, playlist_id, recording_ids):
         with self.connect() as db:
-            self._manual(db, playlist_id)
+            playlist=db.execute('SELECT source FROM playlists WHERE id=?',(playlist_id,)).fetchone()
+            if not playlist or playlist[0] not in {'manual','spotify'}:raise ValueError('Select a playlist')
             position = db.execute("SELECT coalesce(max(position),-1)+1 FROM entries WHERE playlist_id=?", (playlist_id,)).fetchone()[0]
             for recording_id in recording_ids:
+                if playlist[0]=='spotify' and db.execute('SELECT 1 FROM entries WHERE playlist_id=? AND recording_id=?',(playlist_id,recording_id)).fetchone():continue
                 db.execute("INSERT INTO entries(id,playlist_id,recording_id,position) VALUES (?,?,?,?)", (uid(), playlist_id, recording_id, position))
                 position += 1
             self.change(db, "playlist", playlist_id, "membership")
@@ -331,17 +333,23 @@ class Catalogue:
 
     def reorder(self, playlist_id, entry_ids):
         with self.connect() as db:
-            self._manual(db, playlist_id)
+            playlist=db.execute('SELECT source FROM playlists WHERE id=?',(playlist_id,)).fetchone()
+            if not playlist:raise ValueError('Select a playlist')
             existing = {row[0] for row in db.execute("SELECT id FROM entries WHERE playlist_id=?", (playlist_id,))}
             if len(set(entry_ids)) != len(entry_ids) or set(entry_ids) != existing:
                 raise ValueError("Playlist changed; refresh before reordering")
+            if playlist[0]=='spotify':
+                remote=[r[0] for r in db.execute('SELECT id FROM entries WHERE playlist_id=? AND spotify_id IS NOT NULL ORDER BY position,id',(playlist_id,))]
+                if entry_ids[:len(remote)]!=remote:raise ValueError('Spotify controls its songs and order. Local extras can be reordered after the Spotify songs.')
             for position, entry_id in enumerate(entry_ids):
                 db.execute("UPDATE entries SET position=? WHERE id=?", (position, entry_id))
             self.change(db, "playlist", playlist_id, "order")
 
     def remove_entry(self, playlist_id, entry_id):
         with self.connect() as db:
-            self._manual(db, playlist_id)
+            row=db.execute('SELECT p.source,e.spotify_id FROM entries e JOIN playlists p ON p.id=e.playlist_id WHERE e.playlist_id=? AND e.id=?',(playlist_id,entry_id)).fetchone()
+            if not row:raise ValueError('Playlist entry no longer exists')
+            if row[0]=='spotify' and row[1]:raise ValueError('Remove Spotify songs in Spotify, then sync. Local extras can be removed here.')
             db.execute("DELETE FROM entries WHERE playlist_id=? AND id=?", (playlist_id, entry_id))
             self.change(db, "entry", entry_id, "delete")
 
@@ -467,7 +475,8 @@ class Catalogue:
         with self.connect() as db:
             existing = db.execute("SELECT id FROM playlists WHERE source='spotify' AND spotify_id=?", (snapshot["id"],)).fetchone()
             playlist_id = existing[0] if existing else uid()
-            old = [row[0] for row in db.execute("SELECT spotify_id FROM entries WHERE playlist_id=? ORDER BY position", (playlist_id,))]
+            old = [row[0] for row in db.execute("SELECT spotify_id FROM entries WHERE playlist_id=? AND spotify_id IS NOT NULL ORDER BY position", (playlist_id,))]
+            extras=[dict(row) for row in db.execute('SELECT * FROM entries WHERE playlist_id=? AND spotify_id IS NULL ORDER BY position,id',(playlist_id,))]
             if not existing:
                 db.execute("INSERT INTO playlists(id,name,source,spotify_id) VALUES (?,?,'spotify',?)", (playlist_id, snapshot["name"], snapshot["id"]))
             db.execute("UPDATE playlists SET name=?,snapshot=?,synced_at=? WHERE id=?", (snapshot["name"], snapshot["snapshot"], now(), playlist_id))
@@ -476,6 +485,10 @@ class Catalogue:
                 self.store_track(db, track)
                 match = resolved.get(track["id"], {"recording_id": None, "state": "missing"})
                 db.execute("INSERT INTO entries VALUES (?,?,?,?,?,?)", (uid(), playlist_id, match["recording_id"], position, track["id"], match["state"]))
+            # Local-only additions survive every complete remote membership replacement.
+            position=len(snapshot['tracks'])
+            for extra in extras:
+                db.execute('INSERT INTO entries VALUES (?,?,?,?,?,?)',(extra['id'],playlist_id,extra['recording_id'],position,None,extra['match_state']));position+=1
             self.change(db, "playlist", playlist_id, "spotify-snapshot")
         new = [track["id"] for track in snapshot["tracks"]]
         from collections import Counter

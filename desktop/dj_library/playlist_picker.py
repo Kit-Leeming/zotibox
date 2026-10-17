@@ -8,7 +8,7 @@ class PlaylistPicker(QDialog):
         layout=QVBoxLayout(self);bar=QHBoxLayout()
         self.search=QLineEdit();self.search.setPlaceholderText("Search playlist name");self.search.setClearButtonEnabled(True);bar.addWidget(self.search,1)
         self.mode="spotify" if any("collaborative" in p for p in items) else "local" if any("source" in p for p in items) else "native"
-        self.filter=QComboBox();self.filter.addItems(["All","Collaborative","Non-collaborative"] if self.mode=="spotify" else ["All","Local","Rekordbox linked"]);self.filter.setVisible(self.mode!="native");bar.addWidget(self.filter);layout.addLayout(bar)
+        self.filter=QComboBox();self.filter.addItems(["All","Collaborative","Non-collaborative"] if self.mode=="spotify" else ["All","Local","Rekordbox linked","Spotify linked"]);self.filter.setVisible(self.mode!="native");bar.addWidget(self.filter);layout.addLayout(bar)
         if create:
             button=QPushButton("New playlist…");button.clicked.connect(self.create_new);layout.addWidget(button)
         self.list=QListWidget();layout.addWidget(self.list,1)
@@ -38,6 +38,7 @@ class PlaylistPicker(QDialog):
             else:
                 if kind==1 and p.get('source','manual')!='manual':continue
                 if kind==2 and not p.get('rekordbox_id'):continue
+                if kind==3 and p.get('source')!='spotify':continue
             owner=p.get('owner',{});owner=owner.get('display_name','') if isinstance(owner,dict) else owner
             item=QListWidgetItem(p['name']+(f" — {owner}" if owner else ''));item.setData(Qt.ItemDataRole.UserRole,p);self.list.addItem(item)
         self.empty.setVisible(self.list.count()==0);self.ok.setEnabled(self.list.count()>0)

@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt,QTimer,QSize
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
     QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication,QListWidget,QListWidgetItem)
 from PySide6.QtGui import QAction,QKeySequence
-from .rekordbox import Rekordbox
+from .rekordbox import Rekordbox,running,closed
 from .playlist_picker import choose_playlist
 
 ROLE=Qt.ItemDataRole.UserRole
@@ -23,6 +23,12 @@ class RekordboxPanel(QWidget):
                 ("New folder",lambda:self.create(True),"SP_DirIcon"),("Rename",self.rename,"SP_FileDialogDetailedView"),("Delete…",self.delete,"SP_DialogCancelButton")]:
             button=owner.button(text,fn,icon);self.tree_buttons[text]=button;bar.addWidget(button)
         bar.addStretch();layout.addLayout(bar)
+        self.running_warning=QLabel("Rekordbox is open. You can prepare changes here; close Rekordbox before applying them.")
+        self.running_warning.setWordWrap(True);self.running_warning.setObjectName("rekordboxRunningWarning")
+        layout.addWidget(self.running_warning)
+        self.running_timer=QTimer(self);self.running_timer.setInterval(2500)
+        self.running_timer.timeout.connect(self.refresh_running_status);self.running_timer.start()
+        self.refresh_running_status()
         self.search=owner.search_bar("Search Rekordbox collection or selected playlist")
         self.search.textChanged.connect(self.refresh_tracks);layout.addWidget(self.search)
         split=QSplitter()
@@ -46,12 +52,6 @@ class RekordboxPanel(QWidget):
         split.setHandleWidth(12)
         split.addWidget(self.table);split.setSizes([260,1050]);layout.addWidget(split,1)
         bar=QHBoxLayout()
-        self.track_buttons={}
-        for text,fn,icon in [("Edit metadata…",self.edit,"SP_FileDialogDetailedView"),("Add to playlist…",self.add,"SP_ArrowRight"),
-                ("Move up",lambda:self.move(-1),"SP_ArrowUp"),("Move down",lambda:self.move(1),"SP_ArrowDown"),
-                ("Remove entry",self.remove,"SP_DialogCancelButton")]:
-            button=owner.button(text,fn,icon);self.track_buttons[text]=button;bar.addWidget(button)
-        self.table.itemSelectionChanged.connect(self.update_track_controls)
         bar.addStretch();bar.addWidget(owner.row_size_control());layout.addLayout(bar)
         self.summary=QLabel("Connect to Rekordbox in Settings, or refresh to inspect a copy of its library.")
         self.summary.setWordWrap(True);layout.addWidget(self.summary)
@@ -93,10 +93,15 @@ class RekordboxPanel(QWidget):
             if not on_tree and data.get("native_playlist")==id_ and all(data.get("native_songs",[])) and data.get("native_songs"):
                 if self.search.text():raise ValueError("Clear the search before reordering a Rekordbox playlist")
                 existing=[s["id"] for s in playlist["songs"]];moved=[i for i in existing if i in data["native_songs"]]
-                target=self.table.rowAt(point.y());target=target if target>=0 else len(existing)
+                target=self.table.insertion_row(point)
                 position=len([i for i in existing[:target] if i not in moved]);remaining=[i for i in existing if i not in moved]
                 ordered=remaining[:position]+moved+remaining[position:]
-                self.change("Preparing playlist order",lambda:self.backend.reorder_playlist(id_,ordered))
+                def reorder():
+                    self.backend.reorder_playlist(id_,ordered)
+                    return self.backend.view()
+                def reordered(view):
+                    self.loaded(view);self.table.restore_drag_selection(moved,'song_id')
+                self.owner.start_job("Preparing playlist order",lambda progress,cancel:reorder(),reordered)
             elif data.get("native_tracks"):
                 known={t["id"] for t in self.data["tracks"]}
                 if any(i not in known for i in data["native_tracks"]):raise ValueError("Rekordbox tracks changed; refresh")
@@ -210,11 +215,9 @@ class RekordboxPanel(QWidget):
         query=self.search.text().casefold()
         rows=[r for r in rows if query in " ".join(str(r[k]) for k in ["title","artist","album","genre"]).casefold()]
         self.owner.fill_table(self.table,rows,lambda i,r:[r.get("position",i+1),r["title"],r["artist"],r["genre"],"★"*r["rating"],r["color"],f"{int(r['duration'])//60}:{int(r['duration'])%60:02d}"])
-        self.update_track_controls()
 
-    def update_track_controls(self):
-        rows=self.selected();one=len(rows)==1;membership=bool(rows and all(r.get("song_id") for r in rows))
-        for label,button in self.track_buttons.items():button.setVisible(one if label=="Edit metadata…" else bool(rows) if label=="Add to playlist…" else membership and (one or label=="Remove entry"))
+    def refresh_running_status(self):
+        self.running_warning.setVisible(running())
 
     def selected(self):
         return [self.table.item(index.row(),0).data(ROLE) for index in self.table.selectionModel().selectedRows()]
@@ -318,16 +321,17 @@ class RekordboxPanel(QWidget):
     def apply(self):
         try:
             self.owner.ensure_idle()
+            closed()
             if not self.owner.catalogue.get_setting("rekordbox_write_enabled",False):raise ValueError("Enable database writes in Settings > Rekordbox first")
             changes=self.backend.state["changes"] if self.backend.state else []
             if not changes:return
-            if QMessageBox.question(self,"Apply Rekordbox changes","\n".join(changes)+"\n\nClose Rekordbox first. A complete data backup will be created before applying.")!=QMessageBox.StandardButton.Yes:return
+            if QMessageBox.question(self,"Apply Rekordbox changes","\n".join(changes)+"\n\nA complete backup is created when Rekordbox has changed externally. Otherwise the previous verified backup is retained.")!=QMessageBox.StandardButton.Yes:return
             def work(progress,cancel):
                 message=self.backend.apply(progress,cancel)
                 return message,self.backend.view()
             def complete(result):
                 self.loaded(result[1]);self.owner.status.setText(result[0]);self.owner.refresh();self.owner.refresh_rb_backups()
-            self.owner.start_job("Backing up and applying Rekordbox",work,complete)
+            self.owner.start_job("Checking and applying Rekordbox changes",work,complete)
         except Exception as exc:self.owner.show_error(exc)
 
     def discard(self):
@@ -337,10 +341,28 @@ class RekordboxPanel(QWidget):
     def sync_local(self):
         id_=self.owner.playlist_id
         if not id_:return
+        if self.owner.job:self.owner.status.setText("Wait for the current task before linking a Rekordbox playlist");return
+        if not self.backend.state or not self.preview_loaded:
+            def complete(data):self.loaded(data);self.sync_local()
+            self.owner.start_job("Reading Rekordbox playlists",lambda progress,cancel:self.backend.view() if self.backend.state else self.backend.connect(),complete)
+            return
         playlist=next(p for p in self.owner.catalogue.playlists() if p["id"]==id_)
+        dialog=QDialog(self);dialog.setWindowTitle("Link playlist with Rekordbox");dialog.resize(540,210)
+        layout=QVBoxLayout(dialog)
+        label=QLabel("Choose an existing Rekordbox playlist or create one. Synced tracks follow this playlist's order; other Rekordbox tracks are retained after them.")
+        label.setWordWrap(True);layout.addWidget(label)
+        target=QComboBox();target.addItem("Create new Rekordbox playlist","")
+        for row in sorted((p for p in self.data["playlists"] if p["type"]==0),key=lambda p:p["name"].casefold()):target.addItem(row["name"],row["id"])
+        linked=(self.backend.state or {}).get("links",{}).get(id_) or playlist["rekordbox_id"]
+        target.setCurrentIndex(max(0,target.findData(linked)));layout.addWidget(target)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Prepare link and sync")
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+        if not dialog.exec():return
+        target_id=target.currentData()
         def work():
             if not self.backend.state:self.backend.connect()
-            target=self.backend.sync_local(id_,playlist["rekordbox_id"])
+            target=self.backend.sync_local(id_,target_id)
             view=self.backend.view();view["_selection"]=target;return view
         self.task("Preparing Rekordbox sync preview",work)
         self.owner.playlist_tabs.setCurrentIndex(1)

@@ -86,8 +86,10 @@ def worker_config(catalogue, stage,options=None):
     return config
 
 
-def command(config, track_id=None, authenticate=False):
+def command(config, track_id=None, authenticate=False,lossy_fallback='mp3'):
+    if lossy_fallback not in {'native','mp3'}:raise ValueError('Unsupported lossy fallback format')
     args = ["--zotify-worker", "--config", str(config)]
+    args += ['--lossy-fallback',lossy_fallback]
     args += ["--authenticate"] if authenticate else ["--track", track_id]
     if getattr(sys, "frozen", False):
         return [str(Path(sys.executable).with_name("ZotiBox Worker.exe")), *args]
@@ -181,7 +183,7 @@ class DownloadEngine:
         with self.process_lock:
             if self.cancel.is_set():
                 raise InterruptedError("Queue paused")
-            self.process = subprocess.Popen(command(config, track_id, authenticate), cwd=stage, env=environment,
+            self.process = subprocess.Popen(command(config, track_id, authenticate,self.catalogue.get_setting('lossy_fallback','mp3')), cwd=stage, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
                 encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
         errors = []
@@ -246,6 +248,10 @@ class DownloadEngine:
             shutil.rmtree(resolved, ignore_errors=True)
 
     def validate_audio(self,audio,seconds):
+        if audio.suffix.lower()=='.flac':
+            from mutagen.flac import FLAC
+            try:FLAC(audio)
+            except Exception as exc:raise ValueError('Output is not a valid FLAC stream; nothing published') from exc
         with self.process_lock:
             if self.cancel.is_set():raise InterruptedError('Queue paused')
             process=subprocess.Popen([str(ffmpeg_path('ffmpeg')),'-v','error','-i',str(audio),'-f','null','-'],
@@ -380,4 +386,4 @@ class DownloadEngine:
 def source_description(format):
     if format in {"FLAC_FLAC","FLAC_FLAC_24BIT"}:return f"Lossless Spotify source: {format}"
     if format=="unverified":return "Source quality unverified (file extension does not prove lossless)"
-    return f"Lossy Spotify source: {format} (FLAC output remains lossy)"
+    return f"Lossy Spotify source: {format}"

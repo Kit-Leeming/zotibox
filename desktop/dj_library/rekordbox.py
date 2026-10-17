@@ -19,8 +19,11 @@ SPECIAL={"root","100000","200000"}
 
 def running():
     for process in psutil.process_iter(["name"]):
-        if (process.info["name"] or "").lower() in {"rekordbox.exe","rekordbox","rekordboxagent.exe"}:
-            return True
+        try:
+            if (process.info["name"] or "").lower() in {"rekordbox.exe","rekordbox","rekordboxagent.exe"}:
+                return True
+        except (psutil.NoSuchProcess,psutil.AccessDenied):
+            continue
     return False
 
 
@@ -35,6 +38,28 @@ def default_database():
 
 def fingerprint(path):
     return {name:file_hash(path.parent/name) for name in [path.name,path.name+"-wal","masterPlaylists6.xml"] if (path.parent/name).is_file() and (path.parent/name).stat().st_size}
+
+
+def analysis_paths(source,value):
+    """Resolve a track's own DAT/EXT pair beneath the native share directory."""
+    if not isinstance(value,str) or not value or "\x00" in value:return []
+    value=value.replace("\\","/")
+    if value.startswith("//") or ":" in value:return []
+    relative=Path(value.lstrip("/"))
+    if relative.is_absolute() or any(part in {".",".."} for part in relative.parts):return []
+    if relative.suffix.upper() not in {".DAT",".EXT"}:return []
+    share=Path(source).parent/"share"
+    try:
+        if share.is_symlink() or share.is_junction():return []
+        share=share.resolve()
+        selected=(share/relative).resolve()
+        if not selected.is_relative_to(share):return []
+        result=[]
+        for suffix in [".DAT",".EXT"]:
+            path=selected.with_suffix(suffix).resolve()
+            if path.is_relative_to(share) and path.is_file():result.append(str(path))
+        return result
+    except (OSError,ValueError):return []
 
 
 @contextmanager
@@ -159,16 +184,22 @@ class Rekordbox:
             from pyrekordbox.db6.tables import DjmdCue
             for cue in db.session.query(DjmdCue):
                 if cue.InMsec is None or cue.InMsec<0:continue
-                label=cue.Comment or ("Loop" if cue.Kind==4 else "Load point" if cue.Kind==3 else "Cue / memory point")
                 position=cue.InMsec/1000
-                cues.setdefault(cue.ContentID,[]).append({"position":position,"end":max(position,(cue.OutMsec or 0)/1000),"label":f"{label} · {int(position)//60}:{int(position)%60:02d}"})
+                kind=cue.Kind
+                # Keep unfamiliar slot/loop encodings raw instead of guessing.
+                cue_type="memory" if kind==0 else "hot" if isinstance(kind,int) and 1<=kind<=8 else "cue"
+                is_loop=(cue.OutMsec or 0)>cue.InMsec
+                label=cue.Comment or ("Memory" if cue_type=="memory" else "Hot" if cue_type=="hot" else f"Cue (kind {kind})" if kind is not None else "Cue")+(" loop" if is_loop else " cue" if cue_type!="cue" else "")
+                cues.setdefault(cue.ContentID,[]).append({"position":position,"end":max(position,(cue.OutMsec or 0)/1000),"label":f"{label} · {int(position)//60}:{int(position)%60:02d}",
+                    "kind":kind,"cue_type":cue_type,"is_loop":is_loop,"color":cue.Color,"color_index":cue.ColorTableIndex})
             for content in content_query:
                 tracks.append({"id":content.ID,"title":content.Title or "","artist":content.ArtistName or "",
                     "album":content.AlbumName or "","genre":content.GenreName or "","key":content.KeyName or "",
                     "label":content.LabelName or "","rating":round((content.Rating or 0)/51),
                     "color_id":content.ColorID or "","color":content.ColorName or "", "comment":content.Commnt or "",
                     "year":content.ReleaseYear or 0,"track_no":content.TrackNo or 0,
-                    "duration":content.Length or 0,"path":content.FolderPath or "","cues":cues.get(content.ID,[])})
+                    "duration":content.Length or 0,"path":content.FolderPath or "","cues":cues.get(content.ID,[]),
+                    "analysis_paths":analysis_paths(self.source,content.AnalysisDataPath)})
             playlists=[{"id":p.ID,"name":p.Name,"parent":p.ParentID,"type":p.Attribute,"seq":p.Seq,
                 "songs":[{"id":s.ID,"track_id":s.ContentID,"position":s.TrackNo} for s in sorted(p.Songs,key=lambda s:s.TrackNo)]}
                 for p in db.get_playlist() if p.ID not in SPECIAL]
@@ -185,6 +216,9 @@ class Rekordbox:
             xml=previous/"masterPlaylists6.xml"
             if xml.exists():shutil.copy2(xml,destination/xml.name)
             with database(destination/"master.db") as db:
+                # Some pyrekordbox editing helpers call commit internally. Their
+                # live-process guard applies to the native DB, not this copy.
+                db.commit=lambda autoinc=True:commit_copy(db)
                 result=operation(db)
                 commit_copy(db)
             self.state["session"]=destination.name
@@ -286,7 +320,7 @@ class Rekordbox:
 
     def sync_local(self,playlist_id,target=None):
         local=next(p for p in self.catalogue.playlists() if p["id"]==playlist_id)
-        target=target or (self.state or {}).get("links",{}).get(playlist_id) or local["rekordbox_id"]
+        if target is None:target=(self.state or {}).get("links",{}).get(playlist_id) or local["rekordbox_id"]
         entries=self.catalogue.entries(playlist_id)
         view=self.view()
         if target and not any(p["id"]==target for p in view["playlists"]):target=None
@@ -300,10 +334,12 @@ class Rekordbox:
             path=self.catalogue.resolve(row) if row else None
             if not path or not path.is_file():skipped.append(entry);continue
             paths.append((path,row))
+        managed=[]
+        saved_managed=(self.state or {}).get("managed_tracks",{}).get(playlist_id) or self.catalogue.get_setting("rekordbox_managed_tracks",{}).get(playlist_id,{})
+        previous_managed=set(saved_managed.get("tracks",[])) if saved_managed.get("target")==target and saved_managed.get("source")==str(self.source) else set()
         def operation(db):
             from pyrekordbox.db6 import tables
             playlist=self.playlist(db,target,True) if target else db.create_playlist(local["name"])
-            if playlist.Name!=local["name"]:db.rename_playlist(playlist,local["name"])
             existing={}
             for content in db.get_content():existing.setdefault(os.path.normcase(os.path.normpath(content.FolderPath or "")),[]).append(content)
             desired=[]
@@ -316,20 +352,26 @@ class Rekordbox:
                         ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
                     existing[os.path.normcase(os.path.normpath(str(path)))]=[content]
                 desired.append(content)
+            managed.extend(content.ID for content in desired)
             old={}
             for song in sorted(playlist.Songs,key=lambda s:s.TrackNo):old.setdefault(song.ContentID,[]).append(song)
             ordered=[]
             for content in desired:
                 queue=old.get(content.ID,[])
                 ordered.append(queue.pop(0) if queue else db.add_to_playlist(playlist,content))
-            for queue in old.values():
-                for song in queue:db.remove_from_playlist(playlist,song)
+            extras=[]
+            for content_id,queue in old.items():
+                for song in queue:
+                    if content_id in previous_managed or content_id in managed:db.remove_from_playlist(playlist,song)
+                    else:extras.append(song)
+            ordered.extend(sorted(extras,key=lambda s:s.TrackNo))
             for index,song in enumerate(ordered,1):db.move_song_in_playlist(playlist,song,index)
             return playlist.ID
         result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped)",operation)
         self.state.setdefault("local_snapshots",{})[playlist_id]={"name":local["name"],"entries":entries,
             "files":[{"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths]}
         self.state["links"][playlist_id]=result
+        self.state.setdefault("managed_tracks",{})[playlist_id]={"source":str(self.source),"target":result,"tracks":managed}
         self.state.setdefault("skipped_tracks",{})[playlist_id]=[{"title":e["title"],"artist":e["artist"],"spotify_id":e["spotify_id"]} for e in skipped]
         self.save()
         return result
@@ -364,6 +406,27 @@ class Rekordbox:
 
     def backups(self):
         return sorted((self.root/"backups").glob("*.zip"),reverse=True)
+
+    def native_files(self,cancel=None):
+        """Content hashes also detect changes to analysis/cues outside master.db."""
+        result={}
+        for path in self.source.parent.rglob("*"):
+            if cancel and cancel.is_set():raise InterruptedError("Rekordbox comparison cancelled")
+            if path.is_symlink() or path.is_junction():raise ValueError("Rekordbox data directory contains a linked folder")
+            if path.is_file():result[path.relative_to(self.source.parent).as_posix()]=file_hash(path,cancel)
+        return result
+
+    def reusable_backup(self,files,cancel=None):
+        """Only reuse a verified baseline after our own successful native write."""
+        try:
+            state=json.loads((self.root/"last-apply.json").read_text(encoding="utf-8"))
+            archive=(self.root/"backups"/state["backup"]).resolve()
+            if archive.parent!=(self.root/"backups").resolve():return None
+            if state["source"]!=str(self.source) or state["files"]!=files:return None
+            if not archive.is_file() or file_hash(archive,cancel)!=state["backup_sha256"]:return None
+            return archive
+        except (OSError,ValueError,TypeError,KeyError):
+            return None
 
     def backup(self,progress=lambda *a:None,cancel=None,purpose="manual"):
         with LOCK:
@@ -457,6 +520,7 @@ class Rekordbox:
                     if old is None:target.unlink(missing_ok=True)
                     else:shutil.copy2(old,target)
                 raise
+            (self.root/"last-apply.json").unlink(missing_ok=True)
             self.state=None;self.state_path.unlink(missing_ok=True);self.connect()
             return f"Restored backup. Previous state retained in {rescue.name}"
 
@@ -483,7 +547,11 @@ class Rekordbox:
             if str(self.source)!=self.state["source"] or fingerprint(self.source)!=self.state["fingerprint"]:
                 raise ValueError("Rekordbox changed since the preview. Discard the preview and refresh before applying")
             self.verify(self.staged)
-            backup=self.backup(progress,cancel,"before-write")
+            progress(0,"Checking Rekordbox changes since the last ZotiBox apply")
+            files=self.native_files(cancel)
+            backup=self.reusable_backup(files,cancel)
+            reused=backup is not None
+            if backup is None:backup=self.backup(progress,cancel,"before-write")
             if cancel and cancel.is_set():raise InterruptedError("Apply cancelled; live library unchanged")
             closed()
             if fingerprint(self.source)!=self.state["fingerprint"]:raise ValueError("Rekordbox changed during backup; nothing applied")
@@ -504,11 +572,18 @@ class Rekordbox:
                     if data is None:target.unlink(missing_ok=True)
                     else:target.write_bytes(data)
                 raise
+            for _,target in replacements:
+                files[target.relative_to(self.source.parent).as_posix()]=file_hash(target)
+            atomic_json(self.root/"last-apply.json",{"source":str(self.source),"files":files,
+                "backup":backup.name,"backup_sha256":file_hash(backup)})
             with self.catalogue.connect() as db:
                 for id_ in self.state.get("deleted_playlists",[]):db.execute("UPDATE playlists SET rekordbox_id=NULL WHERE rekordbox_id=?",(id_,))
                 for local,target in self.state["links"].items():db.execute("UPDATE playlists SET rekordbox_id=? WHERE id=?",(target,local))
+            managed=self.catalogue.get_setting("rekordbox_managed_tracks",{})
+            managed.update(self.state.get("managed_tracks",{}))
+            self.catalogue.set_setting("rekordbox_managed_tracks",managed)
             self.state["changes"]=[];self.connect()
-            return f"Applied Rekordbox changes; backup: {backup.name}"
+            return f"Applied Rekordbox changes; {'retained existing backup' if reused else 'new backup'}: {backup.name}"
 
     @staticmethod
     def verify(path):
