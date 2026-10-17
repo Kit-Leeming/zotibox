@@ -36,7 +36,7 @@ for name in ["mutagen", "PySide6", "PySide6_Essentials", "PySide6_Addons", "shib
 python_license = Path(sys.base_prefix) / "LICENSE.txt"
 if python_license.is_file():
     shutil.copyfile(python_license, licences / "Python-LICENSE.txt")
-output = generated / "ZotiBox-Source-0.11.0.zip"
+output = generated / "ZotiBox-Source-0.12.0.zip"
 with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
     for directory in ["desktop", "tests", "scripts", "docs", "build"]:
         for path in (root / directory).rglob("*"):

@@ -18,6 +18,7 @@ from .playlist_tree import PlaylistTree,PlaylistItem
 from .match_review import MatchReview
 from .zotify_settings import ZotifySettings
 from .player import MusicPlayer
+from .audio_preferences import fill_formats,fill_qualities,value as audio_value
 from .artwork_async import ArtworkCache
 from .instance import acquire_lock
 from .file_actions import recycle
@@ -80,8 +81,8 @@ class LibraryItem(QTreeWidgetItem):
         if left.get("kind")!=right.get("kind"):
             return left.get("kind")=="folder"
         column=self.treeWidget().sortColumn()
-        if column in {4,5} and left.get("kind")=="file":
-            key="duration" if column==4 else "created_ns"
+        if column in {4,5,8} and left.get("kind")=="file":
+            key={4:'duration',5:'created_ns',8:'bpm'}[column]
             return left[key]<right[key]
         return self.text(column).casefold()<other.text(column).casefold()
 
@@ -482,14 +483,11 @@ class Window(QMainWindow):
         layout.addLayout(bar)
         options=QHBoxLayout()
         self.codec,self.quality=QComboBox(),QComboBox()
-        self.codec.addItems(["flac","copy","mp3","aac","ogg","opus","vorbis"])
-        self.quality.addItems(["auto","lossless","very_high","high","normal"])
-        stored=self.catalogue.get_setting("zotify_options",{})
-        self.codec.setCurrentText(stored.get("DOWNLOAD_FORMAT","flac"))
-        self.quality.setCurrentText(stored.get("DOWNLOAD_QUALITY","auto"))
+        stored=self.catalogue.get_setting('zotify_options',{})
+        fill_formats(self.codec,stored.get('DOWNLOAD_FORMAT','auto'));fill_qualities(self.quality,stored.get('DOWNLOAD_QUALITY','lossless'))
         self.codec.currentTextChanged.connect(self.save_common_options)
         self.quality.currentTextChanged.connect(self.save_common_options)
-        for title,control in [("Format",self.codec),("Source quality",self.quality)]:
+        for title,control in [("Format",self.codec),("Source preference",self.quality)]:
             options.addWidget(QLabel(title))
             options.addWidget(control)
         options.addWidget(self.button("Zotify settings…",self.zotify_settings,"settings"))
@@ -558,7 +556,7 @@ class Window(QMainWindow):
         self.add_library_button=self.button("Add selected to playlist",self.add_selected,"SP_FileDialogListView");self.add_library_button.hide();bar.addWidget(self.add_library_button)
         layout.addLayout(bar)
         tree=self.files_table=LibraryTree(lambda:self.theme)
-        tree.setHeaderLabels(["Folder / title","Artist","Album","Format","Length","File created","Status","Filename"])
+        tree.setHeaderLabels(["Folder / title","Artist","Album","Format","Length","File created","Status","Filename",'BPM'])
         tree.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
         tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         tree.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
@@ -577,8 +575,9 @@ class Window(QMainWindow):
         tree.header().setStretchLastSection(True)
         for index,width in enumerate([330,190,200,80,70,165,140]):
             tree.setColumnWidth(index,width)
+        tree.setColumnWidth(8,75);tree.header().moveSection(8,5)
         layout.addWidget(tree,1)
-        self.details=muted("File created uses Windows creation time. Modified time is available in file details.")
+        self.details=muted("BPM uses file tags or the loaded Rekordbox preview. Scan folders to read existing BPM tags; blank means unavailable.")
         layout.addWidget(self.details)
 
     def build_playlists(self):
@@ -604,7 +603,7 @@ class Window(QMainWindow):
         bar=QHBoxLayout()
         self.queue_missing_button=self.button('Queue missing',self.queue_missing,'SP_ArrowDown');bar.addWidget(self.queue_missing_button)
         self.review_all_button=self.button('Review all',lambda:self.review_needed(True),'SP_FileDialogContentsView');bar.addWidget(self.review_all_button)
-        bar.addStretch();bar.addWidget(self.button('Export…',self.export_menu,'SP_DialogSaveButton'));layout.addLayout(bar)
+        bar.addStretch();bar.addWidget(self.button('Compare…',lambda:self.compare_playlists(),'SP_FileDialogDetailedView'));bar.addWidget(self.button('Export…',self.export_menu,'SP_DialogSaveButton'));layout.addLayout(bar)
         splitter=QSplitter()
         panel=QWidget()
         left=QVBoxLayout(panel)
@@ -628,7 +627,7 @@ class Window(QMainWindow):
         right.setContentsMargins(10,0,0,0)
         self.playlist_summary=muted("Select a playlist")
         right.addWidget(self.playlist_summary)
-        self.entries_table=self.table(["#","Title","Artist","Length","Local match"])
+        self.entries_table=self.table(["#","Title","Artist","Length","Local match",'BPM'])
         self.entries_table.customContextMenuRequested.connect(self.entries_context)
         self.entries_table.itemDoubleClicked.connect(lambda item:self.play_row(item.data(ROLE)))
         for index,width in enumerate([45,360,240,80]):
@@ -748,11 +747,7 @@ class Window(QMainWindow):
         self.auto_download.setChecked(self.catalogue.get_setting("auto_download",False))
         self.auto_download.toggled.connect(lambda value:self.catalogue.set_setting("auto_download",value))
         form.addWidget(self.auto_download)
-        form.addWidget(QLabel('When a FLAC request has only a lossy source'))
-        self.lossy_fallback=QComboBox();self.lossy_fallback.addItem('MP3 320 kbps — DJ compatibility','mp3');self.lossy_fallback.addItem('Original format — no additional lossy encoding','native')
-        self.lossy_fallback.setCurrentIndex(max(0,self.lossy_fallback.findData(self.catalogue.get_setting('lossy_fallback','mp3'))))
-        self.lossy_fallback.currentIndexChanged.connect(lambda _:self.catalogue.set_setting('lossy_fallback',self.lossy_fallback.currentData()))
-        form.addWidget(self.lossy_fallback);form.addWidget(muted('MP3 conversion adds another lossy encoding step. Neither fallback is labelled lossless. Applies to subsequent downloads.'))
+        form.addWidget(muted('Audio output and source preference are available on Downloads and in Zotify settings. Auto chooses genuine FLAC where available, otherwise MP3 320 kbps.'))
         self.zotify_status=muted("Zotify: not connected")
         form.addWidget(self.zotify_status)
         for actions in [[("Connect Zotify",self.connect_zotify),("Fresh Zotify login",lambda:self.connect_zotify(True)),('Open pending login',self.open_pending_login)],
@@ -1053,6 +1048,7 @@ class Window(QMainWindow):
             item.setExpanded(True)
             roots[root["id"]]=item
         folders={}
+        native_bpms={os.path.normcase(t['path']):t.get('bpm',0) for t in self.rb_panel.data['tracks']}
         for row in self.catalogue.files(self.search.text(),self.duplicates.isChecked()):
             parent=roots[row["root_id"]]
             parts=PurePosixPath(row["relative_path"]).parts
@@ -1072,7 +1068,9 @@ class Window(QMainWindow):
             state="Available" if row["available"] and path else "Missing / unmapped"
             if row["copies"]>1:
                 state+=" · duplicate"
-            item=LibraryItem([row["title"],row["artist"],row["album"],row["codec"],duration(row["duration"]),date_ns(row["created_ns"]),state,parts[-1]])
+            native_bpm=native_bpms.get(os.path.normcase(str(path)),0)
+            row['bpm']=row.get('bpm',0) if row.get('bpm',0)>0 else native_bpm
+            item=LibraryItem([row["title"],row["artist"],row["album"],row["codec"],duration(row["duration"]),date_ns(row["created_ns"]),state,parts[-1],f"{row['bpm']:g}" if row['bpm']>0 else ''])
             row["kind"]="file"
             item.setData(0,ROLE,row)
             item.setToolTip(0,str(path or row["relative_path"]))
@@ -1105,9 +1103,11 @@ class Window(QMainWindow):
 
     def refresh_playlists(self):
         previous=self.playlist_id
+        kept={((item.data(ROLE) or item.data(ROLE+2))['id']) for item in self.playlist_list.selectedItems() if item.data(ROLE) or item.data(ROLE+2)}
         block=QSignalBlocker(self.playlist_list)
         self.playlist_list._stop_hover()
         selected=self.playlist_list.currentItem()
+        preserve_selection=previous==((selected.data(ROLE) or {}).get('id') if selected else None)
         selected_folder=selected.data(ROLE+2) if selected else None
         self.playlist_list.clear()
         folders={}
@@ -1140,6 +1140,10 @@ class Window(QMainWindow):
             self.playlist_list.setCurrentRow(0)
         expanded=set(self.catalogue.get_setting('playlist_expanded',[]))
         for id_,item in folders.items():item.setExpanded(id_ in expanded)
+        remaining=[item for item in self.playlist_list.playlist_items()+list(folders.values()) if (item.data(ROLE) or item.data(ROLE+2))['id'] in kept]
+        if remaining and preserve_selection:
+            self.playlist_list.clearSelection()
+            for item in remaining:item.setSelected(True)
         del block
         self.refresh_entries()
 
@@ -1148,8 +1152,14 @@ class Window(QMainWindow):
         playlist=item.data(ROLE) if item else None
         self.playlist_id=playlist["id"] if playlist else None
         entries=self.catalogue.entries(self.playlist_id) if self.playlist_id else []
+        native_bpms={os.path.normcase(t['path']):t.get('bpm',0) for t in self.rb_panel.data['tracks']}
+        self.recording_bpms={}
+        for file in self.catalogue.files():
+            bpm=file.get('bpm',0)
+            if bpm<=0 and native_bpms:bpm=native_bpms.get(os.path.normcase(str(self.catalogue.resolve(file))),0)
+            if bpm>0:self.recording_bpms[file['recording_id']]=bpm
         self.fill_table(self.entries_table,entries,lambda i,row:[str(i+1),row["title"],row["artist"],duration(row["duration"]),
-            row["match_state"].capitalize() if row["spotify_id"] else (("Local extra · " if playlist and playlist['source']=='spotify' else '')+("Available" if self.catalogue.available_recording(row["recording_id"]) else "Missing"))])
+            row["match_state"].capitalize() if row["spotify_id"] else (("Local extra · " if playlist and playlist['source']=='spotify' else '')+("Available" if self.catalogue.available_recording(row["recording_id"]) else "Missing")),self.bpm_text(row)])
         manual=bool(playlist and playlist["source"]=="manual")
         for control in [self.up_button,self.down_button,self.remove_entry_button]:
             control.setEnabled(manual)
@@ -1165,6 +1175,11 @@ class Window(QMainWindow):
         self.queue_missing_button.setText(f'Queue missing ({missing})')
         with self.catalogue.connect() as db:review=db.execute("SELECT count(DISTINCT spotify_id) FROM entries WHERE match_state='review'").fetchone()[0]
         self.review_all_button.setVisible(bool(review));self.review_all_button.setText(f'Review all ({review})')
+
+    def bpm_text(self,row):
+        bpm=row.get('bpm',0)
+        if bpm<=0:bpm=getattr(self,'recording_bpms',{}).get(row.get('recording_id'),0)
+        return f'{bpm:g}' if bpm>0 else ''
 
     def refresh_live(self):
         self.refresh_downloads()
@@ -1752,7 +1767,7 @@ class Window(QMainWindow):
 
     def save_common_options(self):
         options=self.catalogue.get_setting("zotify_options",{})
-        options.update(DOWNLOAD_FORMAT=self.codec.currentText(),DOWNLOAD_QUALITY=self.quality.currentText())
+        options.update(DOWNLOAD_FORMAT=audio_value(self.codec),DOWNLOAD_QUALITY=audio_value(self.quality))
         self.catalogue.set_setting("zotify_options",options)
 
     def zotify_settings(self):
@@ -1955,7 +1970,9 @@ class Window(QMainWindow):
         self.download_folder.setText(catalogue.get_setting("download_folder",str(catalogue.workspace/"Music")))
         self.apply_theme(catalogue.get_setting("theme",make_theme()))
         if hasattr(self,'zotify_panel'):self.zotify_panel.load()
-        with QSignalBlocker(self.lossy_fallback):self.lossy_fallback.setCurrentIndex(max(0,self.lossy_fallback.findData(catalogue.get_setting('lossy_fallback','mp3'))))
+        options=catalogue.get_setting('zotify_options',{})
+        with QSignalBlocker(self.codec):fill_formats(self.codec,options.get('DOWNLOAD_FORMAT','auto'))
+        with QSignalBlocker(self.quality):fill_qualities(self.quality,options.get('DOWNLOAD_QUALITY','lossless'))
         if self.remember:
             QSettings().setValue("database",str(catalogue.workspace))
         self.refresh()
@@ -2033,7 +2050,20 @@ class Window(QMainWindow):
         item=self.playlist_list.itemAt(point)
         if not item:
             menu=QMenu(self);menu.addAction('New folder…',self.new_playlist_folder);menu.exec(self.playlist_list.viewport().mapToGlobal(point));return
-        self.playlist_list.setCurrentItem(item)
+        if not item.isSelected():self.playlist_list.clearSelection();item.setSelected(True)
+        self.playlist_list.setCurrentItem(item,0,QItemSelectionModel.SelectionFlag.NoUpdate)
+        selected=self.playlist_list.selectedItems()
+        if len(selected)>1:
+            menu=QMenu(self);playlists=[i.data(ROLE) for i in selected if i.data(ROLE)]
+            if len(playlists)==len(selected):
+                ids=[p['id'] for p in playlists]
+                if len(ids)==2:menu.addAction('Compare selected playlists…',lambda:self.compare_playlists(['local:'+i for i in ids]))
+                if all(p['source']=='spotify' for p in playlists):menu.addAction('Sync selected from Spotify',lambda:self.sync_ids([p['spotify_id'] for p in playlists]))
+                menu.addAction('Sync selected with Rekordbox',lambda:self.rb_panel.sync_selected_ids(ids))
+                menu.addAction('Export selected M3U8 playlists…',lambda:self.export_selected_playlists(ids))
+                menu.addAction('Remove selected playlists…',lambda:self.delete_selected_playlists(ids))
+            menu.addAction('Move selected to top level',lambda:self.move_selected_playlists_top(selected))
+            menu.exec(self.playlist_list.viewport().mapToGlobal(point));return
         folder=item.data(ROLE+2)
         if folder:
             menu=QMenu(self);menu.addAction('New subfolder…',self.new_playlist_folder)
@@ -2043,6 +2073,7 @@ class Window(QMainWindow):
             menu.exec(self.playlist_list.viewport().mapToGlobal(point));return
         playlist=item.data(ROLE)
         menu=QMenu(self)
+        menu.addAction('Compare with another playlist…',lambda:self.compare_playlists(['local:'+playlist['id']]))
         menu.addAction("Rename playlist…",self.rename_current_playlist)
         menu.addAction("Link / sync with Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
@@ -2126,6 +2157,44 @@ class Window(QMainWindow):
         if self.playlist_id and QMessageBox.question(self,"Remove playlist","Remove this app playlist? Music and the Spotify playlist stay unchanged.")==QMessageBox.StandardButton.Yes:
             self.catalogue.delete_playlist(self.playlist_id)
             self.refresh()
+
+    def delete_selected_playlists(self,ids):
+        try:
+            if self.job:self.status.setText('Wait for the current task before deleting playlists');return
+            if QMessageBox.question(self,'Remove selected playlists',f'Remove {len(ids)} app playlists? Music files and Spotify playlists are retained.')!=QMessageBox.StandardButton.Yes:return
+            with self.catalogue.connect() as db:
+                for id_ in ids:
+                    db.execute('DELETE FROM playlists WHERE id=?',(id_,));self.catalogue.change(db,'playlist',id_,'delete')
+            self.refresh()
+        except Exception as exc:self.show_error(exc)
+
+    def move_selected_playlists_top(self,items):
+        try:
+            for item in items:
+                row=item.data(ROLE) or item.data(ROLE+2)
+                if row:self.catalogue.move_playlist_item(row['id'],None,bool(item.data(ROLE+2)))
+            self.refresh_playlists()
+        except Exception as exc:self.show_error(exc)
+
+    def export_selected_playlists(self,ids):
+        try:
+            folder=QFileDialog.getExistingDirectory(self,'Export selected playlists')
+            if not folder:return
+            import re
+            for p in self.catalogue.playlists():
+                if p['id'] not in ids:continue
+                name=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',p['name']).strip(' .')[:100] or 'Playlist';target=Path(folder)/(name+'.m3u8');n=2
+                while target.exists():target=Path(folder)/f'{name} ({n}).m3u8';n+=1
+                self.catalogue.export_m3u8(p['id'],target)
+            self.status.setText(f'Exported {len(ids)} playlists')
+        except Exception as exc:self.show_error(exc)
+
+    def compare_playlists(self,initial=()):
+        from .playlist_compare import ComparisonDialog,playlist_sources
+        if self.rb_panel.backend.state and not self.rb_panel.preview_loaded and not self.job:
+            def loaded(data):self.rb_panel.loaded(data);self.compare_playlists(initial)
+            self.start_job('Reading playlists for comparison',lambda progress,cancel:self.rb_panel.backend.view(),loaded);return
+        ComparisonDialog(playlist_sources(self.catalogue,self.rb_panel.data),self,initial).exec()
 
     def entries_context(self,point):
         row=self.entries_table.rowAt(point.y())

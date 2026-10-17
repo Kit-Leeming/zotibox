@@ -59,6 +59,8 @@ def validated_options(options):
         else:
             value = str(value)
         if key in PATTERNS:validate_pattern(value)
+        if key=='DOWNLOAD_FORMAT' and value not in {'auto','mp3','flac','original'}:raise ValueError('Choose Auto, MP3, FLAC or Original')
+        if key=='DOWNLOAD_QUALITY' and value not in {'auto','lossless','very_high','high','normal'}:raise ValueError('Choose a supported source preference')
         if key=='REDIRECT_PORT' and not 1<=value<=65535:raise ValueError('Redirect port must be between 1 and 65535')
         if key=='REDIRECT_ADDRESS':
             import ipaddress
@@ -74,6 +76,8 @@ def worker_config(catalogue, stage,options=None):
     config = {key: value["default"] for key, value in schema().items()}
     config.update(API_CLIENT_LEGACY=False,DOWNLOAD_RATE_LIMITER=1.0,OPTIMIZED_DOWNLOADING=False,REDIRECT_ADDRESS='127.0.0.1',REDIRECT_PORT=4381,CUSTOM_FFMEPG_ARGS='')
     config.update(validated_options(catalogue.get_setting("zotify_options", {}) if options is None else options))
+    config['DOWNLOAD_FORMAT']={'auto':'flac','original':'copy'}.get(config['DOWNLOAD_FORMAT'],config['DOWNLOAD_FORMAT'])
+    if config['DOWNLOAD_FORMAT']=='mp3':config['TRANSCODE_BITRATE']='320k'
     config.update({"ROOT_PATH": str(stage / "music"), "ROOT_PODCAST_PATH": str(stage / "music"),
         "CREDENTIALS_LOCATION": str(stage / "credentials.json"), "API_CREDENTIALS_LOCATION": str(stage / "api-credentials.json"),
         "SAVE_CREDENTIALS": True,
@@ -86,10 +90,12 @@ def worker_config(catalogue, stage,options=None):
     return config
 
 
-def command(config, track_id=None, authenticate=False,lossy_fallback='mp3'):
+def command(config, track_id=None, authenticate=False,lossy_fallback='mp3',format_policy='auto'):
     if lossy_fallback not in {'native','mp3'}:raise ValueError('Unsupported lossy fallback format')
     args = ["--zotify-worker", "--config", str(config)]
     args += ['--lossy-fallback',lossy_fallback]
+    if format_policy not in {'auto','mp3','flac','original'}:raise ValueError('Unsupported audio output format')
+    args+=['--format-policy',format_policy]
     args += ["--authenticate"] if authenticate else ["--track", track_id]
     if getattr(sys, "frozen", False):
         return [str(Path(sys.executable).with_name("ZotiBox Worker.exe")), *args]
@@ -183,7 +189,9 @@ class DownloadEngine:
         with self.process_lock:
             if self.cancel.is_set():
                 raise InterruptedError("Queue paused")
-            self.process = subprocess.Popen(command(config, track_id, authenticate,self.catalogue.get_setting('lossy_fallback','mp3')), cwd=stage, env=environment,
+            preferences=self.catalogue.get_setting('zotify_options',{}) if options is None else options
+            policy=preferences.get('DOWNLOAD_FORMAT','auto');policy=policy if policy in {'auto','mp3','flac','original'} else 'original' if policy=='copy' else 'auto'
+            self.process = subprocess.Popen(command(config, track_id, authenticate,'mp3',policy), cwd=stage, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
                 encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
         errors = []

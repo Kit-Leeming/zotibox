@@ -3,8 +3,15 @@ import argparse
 import json
 import sys
 
+class OutputFormatUnavailable(ValueError):
+    """A fixed, credential-free explanation safe to show in the download queue."""
 
-def install_source_policy(track_class, quality_class, audio_file, zotify, emit, fallback='mp3'):
+def public_error(exc):
+    from .zotify_login import failure_message
+    return str(exc) if isinstance(exc,OutputFormatUnavailable) else failure_message(exc)
+
+
+def install_source_policy(track_class, quality_class, audio_file, zotify, emit, fallback='mp3',format_policy=None):
     """Choose the container from the selected stream, before Zotify builds its path.
 
     A .flac preference must never turn a Vorbis/AAC/MP3 stream into pretend
@@ -53,7 +60,7 @@ def install_source_policy(track_class, quality_class, audio_file, zotify, emit, 
                 if output[0] == 'libmp3lame':
                     context.enter_context(zotify.CONFIG.temporary_config('TRANSCODE_BITRATE', '320k'))
             result = original_convert(self, temporary, path)
-        if result is None and zotify.CONFIG.get_download_format().lower() == 'flac':
+        if result is None and (format_policy is not None or zotify.CONFIG.get_download_format().lower() == 'flac'):
             # The fork otherwise renames failed conversions to .ogg, including
             # a FLAC source. Never publish an incorrectly labelled fallback.
             raise RuntimeError('Audio format conversion failed; no output was published')
@@ -61,13 +68,14 @@ def install_source_policy(track_class, quality_class, audio_file, zotify, emit, 
 
     def download(self, parents):
         requested = zotify.CONFIG.get_download_format().lower()
-        if requested != 'flac':
+        if format_policy is None and requested != 'flac':
             return original_download(self, parents)
+        policy=format_policy or 'auto'
         previous_quality = zotify.DOWNLOAD_QUALITY
         stream = None
         selected.clear()
         try:
-            if zotify.CONFIG.get_download_qual_pref() in {'auto', 'lossless'}:
+            if policy=='flac' or zotify.CONFIG.get_download_qual_pref() in {'auto', 'lossless'}:
                 zotify.DOWNLOAD_QUALITY = zotify.parse_dl_quality('lossless')[1]
             stream = original_fetch(self)
             if stream is None and zotify.DOWNLOAD_QUALITY.preferred == AudioQuality.LOSSLESS:
@@ -78,7 +86,14 @@ def install_source_policy(track_class, quality_class, audio_file, zotify, emit, 
             if stream is None:
                 return
             source = selected.get('format', '')
-            if source not in {'FLAC_FLAC', 'FLAC_FLAC_24BIT'}:
+            lossless=source in {'FLAC_FLAC', 'FLAC_FLAC_24BIT'}
+            if policy=='flac' and not lossless:raise OutputFormatUnavailable('No lossless Spotify source is available. Choose Auto or MP3 for this track.')
+            if policy=='mp3':self._zotibox_output=('libmp3lame','mp3')
+            elif policy=='original':
+                extension='flac' if lossless else 'ogg' if source.startswith('OGG_VORBIS_') else 'mp3' if source.startswith('MP3_') else 'm4a' if source.startswith('AAC_') else None
+                if not extension:raise ValueError('Unknown source format; original audio cannot be preserved safely')
+                self._zotibox_output=('copy',extension)
+            elif not lossless:
                 extension = 'ogg' if source.startswith('OGG_VORBIS_') else 'mp3' if source.startswith('MP3_') else 'm4a' if source.startswith('AAC_') else None
                 if extension is None:
                     raise ValueError('Unknown source audio format; refusing unverified FLAC conversion')
@@ -112,6 +127,7 @@ def main(arguments):
     parser.add_argument("--authenticate", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument('--lossy-fallback', choices=('native', 'mp3'), default='mp3')
+    parser.add_argument('--format-policy', choices=('auto','mp3','flac','original'),default='auto')
     args = parser.parse_args(arguments)
     output = sys.stdout
     def emit(event, **values):
@@ -188,7 +204,7 @@ def main(arguments):
             return Progress()
         Printer.pbar = staticmethod(pbar)
         from zotify.api import Track
-        install_source_policy(Track, FormatOnlyAudioQuality, AudioFile, Zotify, emit, args.lossy_fallback)
+        install_source_policy(Track, FormatOnlyAudioQuality, AudioFile, Zotify, emit, args.lossy_fallback,args.format_policy)
         if args.authenticate:
             import zotify.app
             def login_complete(*_):
@@ -208,5 +224,5 @@ def main(arguments):
         from .zotify_login import failure_message
         import traceback
         frames=[{'file':frame.filename.replace('\\','/').split('/')[-1],'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(exc.__traceback__)[-8:]]
-        emit("error", message=failure_message(exc),diagnostic={'type':type(exc).__name__,'frames':frames})
+        emit("error", message=public_error(exc),diagnostic={'type':type(exc).__name__,'frames':frames})
         return 1

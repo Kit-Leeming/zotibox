@@ -10,7 +10,7 @@ class PlaylistItem(QTreeWidgetItem):
 
 class PlaylistTree(DragMixin,QTreeWidget):
     def __init__(self):
-        super().__init__();self.setHeaderHidden(True);self.setDragEnabled(True);self.setAcceptDrops(True);self.setDropIndicatorShown(True)
+        super().__init__();self.setHeaderHidden(True);self.setDragEnabled(True);self.setAcceptDrops(True);self.setDropIndicatorShown(True);self.setSelectionMode(self.SelectionMode.ExtendedSelection)
     def playlist_items(self):
         iterator=QTreeWidgetItemIterator(self);items=[]
         while iterator.value():

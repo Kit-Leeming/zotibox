@@ -198,7 +198,7 @@ class Rekordbox:
                     "label":content.LabelName or "","rating":round((content.Rating or 0)/51),
                     "color_id":content.ColorID or "","color":content.ColorName or "", "comment":content.Commnt or "",
                     "year":content.ReleaseYear or 0,"track_no":content.TrackNo or 0,
-                    "duration":content.Length or 0,"path":content.FolderPath or "","cues":cues.get(content.ID,[]),
+                    "duration":content.Length or 0,'bpm':(content.BPM or 0)/100,'isrc':content.ISRC or '',"path":content.FolderPath or "","cues":cues.get(content.ID,[]),
                     "analysis_paths":analysis_paths(self.source,content.AnalysisDataPath)})
             playlists=[{"id":p.ID,"name":p.Name,"parent":p.ParentID,"type":p.Attribute,"seq":p.Seq,
                 "songs":[{"id":s.ID,"track_id":s.ContentID,"position":s.TrackNo} for s in sorted(p.Songs,key=lambda s:s.TrackNo)]}
@@ -285,6 +285,20 @@ class Rekordbox:
                 db.add_to_playlist(playlist,content)
         return self.stage(f"Add {len(tracks)} track(s) to playlist",operation)
 
+    def delete_playlists(self,ids):
+        import copy
+        items={p['id']:p for p in self.view()['playlists']};ids=set(ids)
+        if not ids or any(i not in items or items[i]['type'] not in {0,1} for i in ids):raise ValueError('Select regular playlists or folders')
+        roots=[]
+        for id_ in ids:
+            parent=items[id_]['parent'];ancestors=set()
+            while parent in items and parent not in ancestors:ancestors.add(parent);parent=items[parent]['parent']
+            if not ancestors&ids:roots.append(id_)
+        previous=copy.deepcopy(self.state)
+        try:
+            for id_ in roots:self.delete_playlist(id_)
+        except Exception:self.state=previous;self.save();raise
+
     def remove_song(self,playlist_id,song_id):
         return self.stage("Remove playlist entry",lambda db:db.remove_from_playlist(self.playlist(db,playlist_id,True),song_id))
 
@@ -325,7 +339,7 @@ class Rekordbox:
         view=self.view()
         if target and not any(p["id"]==target for p in view["playlists"]):target=None
         native_paths={os.path.normcase(os.path.normpath(t["path"])) for t in view["tracks"]}
-        files=self.catalogue.files();paths=[];skipped=[]
+        files=self.catalogue.files();paths=[];skipped=[];converted=0
         for entry in entries:
             choices=[row for row in files if row["recording_id"]==entry["recording_id"] and row["available"]
                       and (path:=self.catalogue.resolve(row)) and path.is_file()] if entry["recording_id"] else []
@@ -333,6 +347,10 @@ class Rekordbox:
             row=choices[0] if choices else None
             path=self.catalogue.resolve(row) if row else None
             if not path or not path.is_file():skipped.append(entry);continue
+            from .compatibility import compatible_path
+            if os.path.normcase(os.path.normpath(str(path))) not in native_paths:
+                original=path;path=compatible_path(self.catalogue,path);converted+=path!=original
+            stat=path.stat();row=dict(row,size=stat.st_size,mtime_ns=stat.st_mtime_ns)
             paths.append((path,row))
         managed=[]
         saved_managed=(self.state or {}).get("managed_tracks",{}).get(playlist_id) or self.catalogue.get_setting("rekordbox_managed_tracks",{}).get(playlist_id,{})
@@ -348,7 +366,7 @@ class Rekordbox:
                 if len(candidates)>1:raise ValueError("Multiple Rekordbox track IDs share a file path; resolve this ambiguity before synchronising")
                 content=candidates[0] if candidates else None
                 if not content:
-                    content=db.add_content(path,Title=row["title"],Length=int(row["duration"]),
+                    content=db.add_content(path,Title=row["title"],Length=int(row["duration"]),ISRC=row.get('isrc') or None,BPM=round(max(0,row.get('bpm',0))*100) or None,
                         ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
                     existing[os.path.normcase(os.path.normpath(str(path)))]=[content]
                 desired.append(content)
@@ -367,7 +385,7 @@ class Rekordbox:
             ordered.extend(sorted(extras,key=lambda s:s.TrackNo))
             for index,song in enumerate(ordered,1):db.move_song_in_playlist(playlist,song,index)
             return playlist.ID
-        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped)",operation)
+        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped; {converted} MP3 compatibility copies)",operation)
         self.state.setdefault("local_snapshots",{})[playlist_id]={"name":local["name"],"entries":entries,
             "files":[{"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths]}
         self.state["links"][playlist_id]=result
@@ -386,10 +404,15 @@ class Rekordbox:
 
     def add_recordings(self,playlist_id,recording_ids):
         files=self.catalogue.files();paths=[]
+        native_paths={os.path.normcase(os.path.normpath(t['path'])) for t in self.view()['tracks']}
         for id_ in recording_ids:
             row=next((r for r in files if r["recording_id"]==id_ and r["available"] and (p:=self.catalogue.resolve(r)) and p.is_file()),None)
             if not row:raise ValueError("Download or match every dragged track before adding to Rekordbox")
-            paths.append((self.catalogue.resolve(row),row))
+            from .compatibility import compatible_path
+            path=self.catalogue.resolve(row)
+            if os.path.normcase(os.path.normpath(str(path))) not in native_paths:path=compatible_path(self.catalogue,path)
+            stat=path.stat()
+            paths.append((path,dict(row,size=stat.st_size,mtime_ns=stat.st_mtime_ns)))
         def operation(db):
             from pyrekordbox.db6 import tables
             playlist=self.playlist(db,playlist_id,True)
@@ -398,7 +421,7 @@ class Rekordbox:
             for path,row in paths:
                 key=os.path.normcase(os.path.normpath(str(path)));matches=existing.get(key,[])
                 if len(matches)>1:raise ValueError("Multiple Rekordbox identities share this file; resolve that ambiguity first")
-                content=matches[0] if matches else db.add_content(path,Title=row["title"],Length=int(row["duration"]),ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
+                content=matches[0] if matches else db.add_content(path,Title=row["title"],Length=int(row["duration"]),ISRC=row.get('isrc') or None,BPM=round(max(0,row.get('bpm',0))*100) or None,ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
                 existing[key]=[content];db.add_to_playlist(playlist,content)
         result=self.stage(f"Add {len(paths)} local track(s) to Rekordbox playlist",operation)
         self.state.setdefault("imported_files",[]).extend({"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths)

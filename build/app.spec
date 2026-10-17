@@ -9,7 +9,7 @@ a = Analysis(
     binaries=collect_dynamic_libs('pyogg') + collect_dynamic_libs('sqlcipher3') + [(str(path),'ffmpeg') for path in (root/'tools'/'ffmpeg').glob('*') if path.suffix.lower() in {'.exe','.dll'}],
     datas=[(str(root / 'THIRD-PARTY-NOTICES.md'), '.'),
            (str(root / 'build' / 'generated' / 'licenses'), 'licenses'),
-           (str(root / 'build' / 'generated' / 'ZotiBox-Source-0.11.0.zip'), '.'),
+           (str(root / 'build' / 'generated' / 'ZotiBox-Source-0.12.0.zip'), '.'),
            (str(root/'tools'/'ffmpeg'/'LICENSE.txt'),'licenses/FFmpeg'),
            (str(root/'desktop'/'dj_library'/'resources'),'dj_library/resources')]
           + copy_metadata('zotify') + copy_metadata('librespot') + copy_metadata('pyrekordbox') + collect_data_files('pyogg'),

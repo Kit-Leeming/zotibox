@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt,QBuffer,QIODevice
 from PySide6.QtGui import QImage,QColor,QPainter,QLinearGradient
 from PySide6.QtWidgets import QApplication
 from mutagen.wave import WAVE
-from mutagen.id3 import TIT2,TPE1,TALB,APIC
+from mutagen.id3 import TIT2,TPE1,TALB,APIC,TBPM
 from dj_library.ui import Window
 
 root=Path(__file__).resolve().parents[1]
@@ -22,7 +22,7 @@ for i,(title,artist,folder) in enumerate(names):
     path=music/folder/(artist+' - '+title+'.wav');path.parent.mkdir(exist_ok=True)
     with wave.open(str(path),'wb') as audio:audio.setparams((1,2,8000,8000,'NONE','not compressed'));audio.writeframes(b'\0\0'*8000)
     tags=WAVE(path);tags.add_tags()
-    for kind,text in [(TIT2,title),(TPE1,artist),(TALB,'Demo collection')]:tags.tags.add(kind(encoding=3,text=[text]))
+    for kind,text in [(TIT2,title),(TPE1,artist),(TALB,'Demo collection'),(TBPM,str(120+i))]:tags.tags.add(kind(encoding=3,text=[text]))
     image=QImage(160,160,QImage.Format.Format_RGB32);p=QPainter(image);gradient=QLinearGradient(0,0,160,160)
     gradient.setColorAt(0,QColor.fromHsv((i*37)%360,150,130));gradient.setColorAt(1,QColor.fromHsv((i*37+60)%360,210,45));p.fillRect(image.rect(),gradient)
     p.setPen(QColor('#e9edef'));font=p.font();font.setPixelSize(54);p.setFont(font);p.drawText(image.rect(),Qt.AlignmentFlag.AlignCenter,f'{i+1:02d}');p.end()
@@ -42,6 +42,7 @@ p=c.sync_playlist({'id':'9'*22,'name':'Friday warm-up','snapshot':'demo','comple
 c.move_playlist_item(p,warm)
 for name,parent in [('Opening set',warm),('Main room',peak),('Closing set',folder)]:
     local=c.create_playlist(name);c.move_playlist_item(local,parent);c.add_entries(local,[r['recording_id'] for r in c.files()[:6]])
+    if name=='Opening set':compare_id=local;c.add_entries(local,[r['recording_id'] for r in c.files()[-2:]])
 c.set_setting('playlist_expanded',[folder,warm,peak]);window.playlist_id=p;window.refresh();window.resize(1500,920);window.show()
 window.workspace_label.setText('Demo music library');output=root/'docs'/'images';output.mkdir(parents=True,exist_ok=True)
 def capture(name,page):
@@ -53,5 +54,9 @@ for i,t in enumerate(tracks[-4:]):c.enqueue(t['id'],{'key':'spotify:playlist:'+(
 job=c.download_jobs()[0];c.update_download(job['id'],state='running',progress=42,message='Downloading · real-time speed')
 window.download_job=object();window.refresh_downloads();window.download_tabs.setCurrentIndex(1);window.downloads_table.selectRow(1);capture('downloads.png',1)
 window.download_job=None;window.zotify_settings();window.zotify_panel.loading=True;window.zotify_panel.destination.setText(r'C:\Music\ZotiBox');window.zotify_panel.loading=False;capture('zotify-settings.png',4)
+from dj_library.playlist_compare import ComparisonDialog,playlist_sources
+dialog=ComparisonDialog(playlist_sources(c,{}),window,initial=['local:'+p,'local:'+compare_id]);dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen);dialog.show()
+for _ in range(20):app.processEvents();time.sleep(.01)
+dialog.grab().save(str(output/'comparison.png'));dialog.close()
 window.download_job=None;window.close()
 print('Captured demo screenshots in docs/images')

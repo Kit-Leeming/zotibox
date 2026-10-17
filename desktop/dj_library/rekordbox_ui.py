@@ -1,6 +1,6 @@
 """Rekordbox collection and playlist preview inside the Playlists page."""
 from pathlib import Path
-from PySide6.QtCore import Qt,QTimer,QSize
+from PySide6.QtCore import Qt,QTimer,QSize,QItemSelectionModel
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QTreeWidget,QTreeWidgetItem,QSplitter,
     QComboBox,QInputDialog,QDialog,QFormLayout,QLineEdit,QSpinBox,QDialogButtonBox,QMessageBox,QFileDialog,QMenu,QApplication,QListWidget,QListWidgetItem)
 from PySide6.QtGui import QAction,QKeySequence
@@ -34,6 +34,7 @@ class RekordboxPanel(QWidget):
         split=QSplitter()
         from .themes import RowDelegate
         self.tree=type(owner.files_table)(lambda:owner.theme)
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.setItemDelegate(RowDelegate(self.tree,lambda:owner.theme))
         self.tree.setIconSize(QSize(20,20))
         self.tree.setHeaderHidden(True)
@@ -44,7 +45,8 @@ class RekordboxPanel(QWidget):
         for key,fn in [("Delete",self.delete),("F2",self.rename)]:
             action=QAction(self.tree);action.setShortcut(QKeySequence(key));action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut);action.triggered.connect(fn);self.tree.addAction(action)
         split.addWidget(self.tree)
-        self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length"])
+        self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length",'BPM'])
+        self.table.setColumnWidth(7,75);self.table.horizontalHeader().moveSection(7,3)
         for column,width in enumerate([45,300,210,160,75,100,70]):self.table.setColumnWidth(column,width)
         self.table.customContextMenuRequested.connect(self.track_context)
         self.table.itemDoubleClicked.connect(lambda item:self.owner.play_row(item.data(ROLE)))
@@ -143,6 +145,7 @@ class RekordboxPanel(QWidget):
 
     def refresh_tree(self):
         reveal=self.data.get("_selection") is not None
+        kept={item.data(0,ROLE) for item in self.tree.selectedItems()}
         previous=self.data.pop("_selection",None) or self.current_playlist()
         self.tree.blockSignals(True);self.tree._stop_hover();self.tree.clear()
         collection=QTreeWidgetItem(["Collection"]);collection.setData(0,ROLE,None)
@@ -158,6 +161,10 @@ class RekordboxPanel(QWidget):
         expanded=set(self.owner.catalogue.get_setting("rekordbox_expanded",[]))
         for id_,item in items.items():item.setExpanded(id_ in expanded)
         chosen=items.get(previous,collection);self.tree.setCurrentItem(chosen)
+        if not reveal and kept:
+            self.tree.clearSelection()
+            for id_,item in items.items():item.setSelected(id_ in kept)
+            collection.setSelected(None in kept)
         if reveal:
             parent=chosen.parent()
             while parent:parent.setExpanded(True);parent=parent.parent()
@@ -178,13 +185,24 @@ class RekordboxPanel(QWidget):
     def tree_context(self,point):
         item=self.tree.itemAt(point)
         if not item:return
-        self.tree.setCurrentItem(item);menu=QMenu(self)
+        if not item.isSelected():self.tree.clearSelection();item.setSelected(True)
+        self.tree.setCurrentItem(item,0,QItemSelectionModel.SelectionFlag.NoUpdate);menu=QMenu(self)
+        ids=[i.data(0,ROLE) for i in self.tree.selectedItems()]
+        if len(ids)>1:
+            rows=[p for p in self.data['playlists'] if p['id'] in ids]
+            if len(rows)==len(ids) and all(p['type'] in {0,1} for p in rows):
+                menu.addAction('Delete selected playlists / folders…',self.delete)
+                menu.addAction('Move selected to top level',lambda:self.change('Moving playlists',lambda:[self.backend.move_playlist(i) for i in ids]))
+            if len(rows)==2 and all(p['type']==0 for p in rows):menu.addAction('Compare selected playlists…',lambda:self.owner.compare_playlists(['native:'+i for i in ids]))
+            if rows and len(rows)==len(ids) and all(p['type']==0 for p in rows):menu.addAction('Export selected M3U8 playlists…',lambda:self.export_selected(ids))
+            menu.exec(self.tree.viewport().mapToGlobal(point));return
         menu.addAction("New playlist…",lambda:self.create(False));menu.addAction("New folder…",lambda:self.create(True))
         if self.current_playlist():
             menu.addAction("Rename…",self.rename)
             menu.addAction("Delete playlist / folder…",self.delete)
             playlist=next((p for p in self.data["playlists"] if p["id"]==self.current_playlist()),None)
             if playlist and playlist["type"]==0:menu.addAction("Export M3U8…",self.export_playlist)
+            if playlist and playlist['type']==0:menu.addAction('Compare with another playlist…',lambda:self.owner.compare_playlists(['native:'+playlist['id']]))
             if playlist and playlist['type'] in {0,1}:
                 id_=playlist['id'];menu.addAction('Move to top level',lambda:self.change('Moving playlist',lambda:self.backend.move_playlist(id_)))
         menu.addAction("Collapse all folders",self.tree.collapseAll)
@@ -214,7 +232,7 @@ class RekordboxPanel(QWidget):
         rows=[dict(tracks[s["track_id"]],song_id=s["id"],position=s["position"]) for s in playlist["songs"] if s["track_id"] in tracks] if playlist else list(tracks.values()) if id_ is None else []
         query=self.search.text().casefold()
         rows=[r for r in rows if query in " ".join(str(r[k]) for k in ["title","artist","album","genre"]).casefold()]
-        self.owner.fill_table(self.table,rows,lambda i,r:[r.get("position",i+1),r["title"],r["artist"],r["genre"],"★"*r["rating"],r["color"],f"{int(r['duration'])//60}:{int(r['duration'])%60:02d}"])
+        self.owner.fill_table(self.table,rows,lambda i,r:[r.get("position",i+1),r["title"],r["artist"],r["genre"],"★"*r["rating"],r["color"],f"{int(r['duration'])//60}:{int(r['duration'])%60:02d}",f"{r.get('bpm',0):g}" if r.get('bpm',0)>0 else ''])
 
     def refresh_running_status(self):
         self.running_warning.setVisible(running())
@@ -241,14 +259,38 @@ class RekordboxPanel(QWidget):
         if ok:self.change("Preparing rename",lambda:self.backend.rename_playlist(id_,name))
 
     def delete(self):
-        if self.owner.job:self.owner.status.setText("Wait for the current task before deleting a playlist");return
-        id_=self.current_playlist();playlist=next((p for p in self.data["playlists"] if p["id"]==id_),None)
-        if not playlist or playlist["type"] not in {0,1}:return
-        suffix=" and all playlists inside it" if playlist["type"]==1 else ""
-        if QMessageBox.question(self,"Delete Rekordbox playlist / folder",f"Prepare deletion of ‘{playlist['name']}’{suffix}?\nTracks, music files and cues are retained. Review and Apply to change Rekordbox.")!=QMessageBox.StandardButton.Yes:return
-        parent=playlist["parent"]
-        def work():self.backend.delete_playlist(id_);return parent
-        self.change("Preparing playlist deletion",work)
+        if self.owner.job:self.owner.status.setText('Wait for the current task before deleting playlists');return
+        ids=[i.data(0,ROLE) for i in self.tree.selectedItems()]
+        if not ids and self.current_playlist():ids=[self.current_playlist()]
+        rows=[p for p in self.data['playlists'] if p['id'] in ids]
+        if not rows or len(rows)!=len(ids) or any(p['type'] not in {0,1} for p in rows):return
+        if QMessageBox.question(self,'Delete Rekordbox playlists / folders',f"Prepare deletion of {len(rows)} selected playlist(s)/folder(s), including folder contents?\nMusic files, collection tracks and cues are retained. Review and Apply to change Rekordbox.")!=QMessageBox.StandardButton.Yes:return
+        self.change('Preparing playlist deletions',lambda:self.backend.delete_playlists(ids))
+
+    def sync_selected_ids(self,ids):
+        def work():
+            if not self.backend.state:self.backend.connect()
+            for id_ in ids:self.backend.sync_local(id_)
+            return self.backend.view()
+        self.task('Preparing selected playlist syncs',work);self.owner.playlist_tabs.setCurrentIndex(1)
+
+    def export_selected(self,ids):
+        try:
+            import re
+            folder=QFileDialog.getExistingDirectory(self,'Export selected Rekordbox playlists')
+            if not folder:return
+            tracks={t['id']:t for t in self.data['tracks']}
+            for p in self.data['playlists']:
+                if p['id'] not in ids or p['type']!=0:continue
+                name=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',p['name']).strip(' .')[:100] or 'Playlist';target=Path(folder)/(name+'.m3u8');n=2
+                while target.exists():target=Path(folder)/f'{name} ({n}).m3u8';n+=1
+                lines=['#EXTM3U']
+                for song in p['songs']:
+                    t=tracks.get(song['track_id'])
+                    if t and Path(t['path']).is_file():lines.extend([f"#EXTINF:{int(t['duration'])},{t['artist']} - {t['title']}".replace('\n',' ').replace('\r',' '),t['path']])
+                target.write_text('\n'.join(lines)+'\n',encoding='utf-8')
+            self.owner.status.setText(f'Exported {len(ids)} playlists')
+        except Exception as exc:self.owner.show_error(exc)
 
     def export_playlist(self):
         id_=self.current_playlist();playlist=next((p for p in self.data["playlists"] if p["id"]==id_ and p["type"]==0),None)

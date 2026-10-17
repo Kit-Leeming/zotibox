@@ -18,7 +18,7 @@ def test_invalid_flac_container_rejected_before_publication(tmp_path):
     with pytest.raises(ValueError,match='not a valid FLAC'):engine.validate_audio(path,1)
 
 
-def bridge(formats, *, preference='auto', custom='-c:a flac', configured='flac', converter=None, unavailable_lossless=False,fallback='native'):
+def bridge(formats, *, preference='auto', custom='-c:a flac', configured='flac', converter=None, unavailable_lossless=False,fallback='native',format_policy=None):
     class Config:
         get_download_format = staticmethod(lambda: configured)
         get_download_qual_pref = staticmethod(lambda: preference)
@@ -76,7 +76,7 @@ def bridge(formats, *, preference='auto', custom='-c:a flac', configured='flac',
 
     if converter is not None:
         Track.convert_audio_format = converter
-    install_source_policy(Track, Quality, AudioFile, zotify, lambda event, **kw: events.append((event, kw)),fallback=fallback)
+    install_source_policy(Track, Quality, AudioFile, zotify, lambda event, **kw: events.append((event, kw)),fallback=fallback,format_policy=format_policy)
     track = Track()
     track.fetches = 0
     return track, zotify, stream, events, previous

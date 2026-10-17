@@ -2,9 +2,10 @@
 from pathlib import Path
 from PySide6.QtCore import Qt,QSignalBlocker
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QLineEdit,QTableWidget,QTableWidgetItem,QFileDialog,QMessageBox
+from .audio_preferences import fill_formats,fill_qualities,value as audio_value
 from .downloads import schema,MANAGED,PATTERNS,validated_options,worker_config
 
-DEFAULTS={**{k:'{artist} - {song_name}' for k in PATTERNS},'OUTPUT':'','API_CLIENT_ID':'','DOWNLOAD_RATE_LIMITER':1.0,'OPTIMIZED_DOWNLOADING':False,'API_CLIENT_LEGACY':False}
+DEFAULTS={**{k:'{artist} - {song_name}' for k in PATTERNS},'OUTPUT':'','API_CLIENT_ID':'','DOWNLOAD_RATE_LIMITER':1.0,'OPTIMIZED_DOWNLOADING':False,'API_CLIENT_LEGACY':False,'DOWNLOAD_FORMAT':'auto','DOWNLOAD_QUALITY':'lossless'}
 INTERNAL={
     'ROOT_PATH':'Choose the shared music destination above. Verified downloads are placed there.',
     'ROOT_PODCAST_PATH':'The shared destination above is used for the single-track queue.',
@@ -25,6 +26,8 @@ INTERNAL={
     'STANDARD_INTERFACE':'The worker uses structured progress events for the download queue.',
     'PRINT_SPLASH':'Terminal splash output is omitted in the desktop app.'}
 HELP={
+    'DOWNLOAD_FORMAT':'Auto: genuine FLAC if available, otherwise MP3 320 kbps. MP3: always encode 320 kbps. FLAC: requires a lossless source. Original: preserve the selected source codec.',
+    'DOWNLOAD_QUALITY':'Preferred source, independent of output. Lossless where available falls back to the best lossy representation. Explicit FLAC output always requires lossless.',
     'DOWNLOAD_RATE_LIMITER':'Audio-duration multiplier: 1 adds real-time pacing; 0 adds no delay. Downloads remain sequential.',
     'OPTIMIZED_DOWNLOADING':'Enable the fork’s optimisation within a job; ZotiBox still runs one queue entry at a time.',
     'CUSTOM_FFMEPG_ARGS':'Additional FFmpeg output arguments, for example -ar 48000. The fork may fall back if they fail.',
@@ -38,7 +41,7 @@ HELP={
     'OUTPUT_PLAYLIST_EXT':'Final filename pattern for tracks queued from a playlist.',
     'OUTPUT_LIKED_SONGS':'Pattern retained for liked-song sources. Liked Songs bulk import is not currently available.',
     'MAX_FILENAME_LENGTH':'Upstream temporary filename limit. Final pattern components are limited to 140 characters.',
-    'TRANSCODE_BITRATE':'Bitrate used when converting lossy formats; auto uses the selected source bitrate.',
+    'TRANSCODE_BITRATE':'MP3 output is fixed at 320 kbps. Original preserves the source bitrate; FLAC is lossless. Source preference is selected separately.',
     'DOWNLOAD_QUALITY':'Requested source quality. Actual source availability may differ.',
     'DOWNLOAD_FORMAT':'Output codec. copy keeps the selected source codec; FLAC conversion does not restore lost audio data.',
     'FFMPEG_LOG_LEVEL':'Verbosity of FFmpeg conversion output inside the worker.',
@@ -55,7 +58,7 @@ def category(key):
 
 class ZotifySettings(QWidget):
     def __init__(self,owner):
-        super().__init__();self.owner=owner;self.loading=False;layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
+        super().__init__();self.owner=owner;self.loading=True;layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0)
         layout.addWidget(QLabel('Music destination'))
         row=QHBoxLayout();self.destination=QLineEdit();row.addWidget(self.destination,1);row.addWidget(owner.button('Browse…',self.browse,'SP_DirOpenIcon'));layout.addLayout(row)
         note=QLabel('Audio, metadata and connection preferences apply to subsequent downloads. Filename patterns support artist, album, song_name, song_title, title, song_id, isrc, playlist, playlist_num and album_num. Use / for subfolders.');note.setWordWrap(True);layout.addWidget(note)
@@ -65,13 +68,15 @@ class ZotifySettings(QWidget):
         self.table.verticalHeader().hide();self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection);self.table.setWordWrap(True)
         self.table.setColumnWidth(0,210);self.table.setColumnWidth(1,210);layout.addWidget(self.table)
         self.editors={};self.definitions=schema();self.table.setRowCount(len(self.definitions))
-        enums={'DOWNLOAD_FORMAT':['flac','copy','mp3','aac','ogg','opus','vorbis'],'DOWNLOAD_QUALITY':['auto','lossless','very_high','high','normal']}
+        enums={'DOWNLOAD_FORMAT':['auto','mp3','flac','original'],'DOWNLOAD_QUALITY':['auto','lossless','very_high','high','normal']}
         for index,(key,definition) in enumerate(self.definitions.items()):
             label=QTableWidgetItem(key.replace('_',' ').title());label.setToolTip(key+'\n'+' '.join(definition['flags']));label.setFlags(label.flags()&~Qt.ItemFlag.ItemIsEditable);self.table.setItem(index,0,label)
             if definition['type']=='bool' or key in enums:
                 editor=QComboBox();editor.addItems(['True','False'] if definition['type']=='bool' else enums[key]);editor.currentTextChanged.connect(self.changed)
+                if key=='DOWNLOAD_FORMAT':fill_formats(editor)
+                if key=='DOWNLOAD_QUALITY':fill_qualities(editor)
             else:editor=QLineEdit();editor.textChanged.connect(self.changed)
-            editor.setEnabled(key not in MANAGED);editor.setToolTip(key);editor.setMaximumHeight(36)
+            editor.setEnabled(key not in MANAGED and key!='TRANSCODE_BITRATE');editor.setToolTip(key);editor.setMaximumHeight(36)
             holder=QWidget();holder_layout=QVBoxLayout(holder);holder_layout.setContentsMargins(4,6,4,6);holder_layout.addWidget(editor,0,Qt.AlignmentFlag.AlignVCenter)
             self.table.setCellWidget(index,1,holder);self.editors[key]=editor
             detail=INTERNAL.get(key) or HELP.get(key) or f"{category(key)} preference. Type: {definition['type']}."
@@ -92,7 +97,10 @@ class ZotifySettings(QWidget):
         self.destination.setText(self.owner.catalogue.get_setting('download_folder',str(self.owner.catalogue.workspace/'Music')))
         for key,editor in self.editors.items():
             value=options.get(key,DEFAULTS.get(key,self.definitions[key]['default'])) if key not in MANAGED else effective[key]
-            if isinstance(editor,QComboBox):editor.setCurrentText(str(value))
+            if key=='TRANSCODE_BITRATE':value='320k'
+            if key=='DOWNLOAD_FORMAT':fill_formats(editor,str(value))
+            elif key=='DOWNLOAD_QUALITY':fill_qualities(editor,str(value))
+            elif isinstance(editor,QComboBox):editor.setCurrentText(str(value))
             else:editor.setText(str(value))
         self.loading=False;self.status.setText('Defaults loaded; save to apply.' if defaults else 'Preferences saved.');self.filter()
 
@@ -110,10 +118,13 @@ class ZotifySettings(QWidget):
             destination=Path(self.destination.text()).expanduser()
             if not destination.is_absolute():raise ValueError('Choose an absolute music destination path')
             if str(destination)!=self.owner.catalogue.get_setting('download_folder',str(self.owner.catalogue.workspace/'Music')):self.owner.ensure_idle()
-            values=validated_options({key:(editor.currentText() if isinstance(editor,QComboBox) else editor.text()) for key,editor in self.editors.items() if key not in MANAGED})
+            values=validated_options({key:(audio_value(editor) if isinstance(editor,QComboBox) else editor.text()) for key,editor in self.editors.items() if key not in MANAGED})
             self.owner.catalogue.set_setting('zotify_options',values);self.owner.catalogue.set_setting('download_folder',str(destination));self.owner.download_folder.setText(str(destination))
             self.owner.zotify_redirect_reference.setText(f"http://{values['REDIRECT_ADDRESS']}:{values['REDIRECT_PORT']}/login")
             for widget,key in [(self.owner.codec,'DOWNLOAD_FORMAT'),(self.owner.quality,'DOWNLOAD_QUALITY')]:
-                block=QSignalBlocker(widget);widget.setCurrentText(str(values[key]));del block
+                block=QSignalBlocker(widget)
+                if key=='DOWNLOAD_FORMAT':fill_formats(widget,str(values[key]))
+                else:fill_qualities(widget,str(values[key]))
+                del block
             self.status.setText('Saved. The running download keeps its settings; queued tracks use these preferences.')
         except Exception as exc:QMessageBox.warning(self,'Invalid Zotify setting',str(exc))

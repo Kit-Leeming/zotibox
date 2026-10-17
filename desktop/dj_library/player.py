@@ -3,9 +3,10 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 from mutagen import File
-from PySide6.QtCore import Qt,QThread,Signal,QUrl
-from PySide6.QtGui import QColor,QPainter,QPen
+from PySide6.QtCore import Qt,QThread,Signal,QUrl,QTimer
+from PySide6.QtGui import QColor,QPainter,QPen,QImage
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QSlider,QComboBox,QSizePolicy
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from .downloads import ffmpeg_path
@@ -53,7 +54,7 @@ def read_analysis(paths):
                 result['beats']=[{'time':float(t),'beat':int(b),'bpm':float(p)} for b,p,t in zip(beats,bpms,times)]
             elif tag.type=='PWV5':
                 heights,colors=tag.get();colors=colors.astype(float);colors[:,0]/=14;colors[:,1:]/=7
-                result['native_colors']=(heights,np.clip(colors,0,1))
+                if len(heights):result['native_colors']=(heights,np.clip(colors,0,1))
     return result
 
 class WaveJob(QThread):
@@ -87,30 +88,17 @@ class Waveform(QWidget):
         amplitude=max(2,self.height()/2-4 if self.overview else self.height()/2-17)
         start,end=self.visible_range();span=end-start
         def xpos(t):return int((t-start)/span*self.width())
-        p.setPen(QPen(QColor(theme['accent']['start']),1))
-        for x in range(self.width()):
-            if not self.peaks:break
-            index=min(len(self.peaks)-1,int(self.seconds_at(x)/max(.001,self.length)*len(self.peaks)))
-            last=min(len(self.peaks),max(index+1,int(self.seconds_at(x+1)/max(.001,self.length)*len(self.peaks))))
-            color=QColor(theme['accent']['start']);value=max(self.peaks[index:last])*amplitude
-            if self.mode=='Rekordbox RGB' and self.native_colors is not None:
-                heights,colors=self.native_colors;i=min(len(heights)-1,int(self.seconds_at(x)/max(.001,self.length)*len(heights)))
-                value=float(heights[i])*amplitude;color=QColor.fromRgbF(*[float(c) for c in colors[i]])
-            elif self.mode in {'RGB','3 band'} and self.bands is not None and len(self.bands):
-                energy=self.bands[index:last].max(axis=0);total=max(.001,float(energy.max()))
-                if self.mode=='3 band':
-                    for band,col in sorted(zip(energy,['#ed745d','#57cfa9','#65aaf7']),reverse=True):
-                        p.setPen(QColor(col));h=min(1,float(band)/max(.001,total))*value;p.drawLine(x,int(middle-h),x,int(middle+h))
-                    continue
-                color=QColor.fromRgbF(*[min(1,.18+.82*float(c)/total) for c in energy])
-            elif self.mode=='Blue':color=QColor('#58b8f1')
-            p.setPen(color);p.drawLine(x,int(middle-value),x,int(middle+value))
+        if self.peaks:
+            image,tile_start,scale=self.wave_image(start,end)
+            offset=(start-tile_start)*scale
+            p.drawImage(QRectF(0,0,self.width(),self.height()),image,QRectF(offset,0,self.width(),self.height()))
         if self.length:
             if self.grid and not self.overview:
                 previous=-100
+                spacing=(self.beats[1]['time']-self.beats[0]['time'])*self.width()/span if len(self.beats)>1 else 999
                 for beat in self.beats:
                     x=xpos(beat['time']);down=beat['beat']==1
-                    if x<0 or x>self.width() or (x-previous<7 and not down):continue
+                    if x<0 or x>self.width() or x-previous<7 or spacing<7 and not down:continue
                     p.setPen(QColor(255,255,255,135 if down else 55));p.drawLine(x,16,x,self.height());previous=x
                     if down and span<35:p.drawText(x+3,26,'1')
             for cue in self.cues:
@@ -122,6 +110,40 @@ class Waveform(QWidget):
                 p.setPen(QColor(theme['foreground']['start']));p.drawRect(QRectF(a/self.length*self.width(),1,size/self.length*self.width(),self.height()-2))
             x=xpos(self.position/1000);p.setPen(QPen(QColor(theme['foreground']['start']),2));p.drawLine(x,0,x,self.height())
         p.end()
+    def wave_image(self,start,end):
+        """Cache three view widths, so scrolling blits pixels rather than analyzing audio."""
+        span=end-start;scale=max(1,self.width())/span;theme=self.get_theme()
+        key=(self.width(),self.height(),self.length,self.mode,self.zoom if not self.overview else 1,id(self.peaks),id(self.bands),id(self.native_colors),theme['accent']['start'])
+        cached=getattr(self,'_wave_cache',None)
+        if cached and cached[0]==key and start>=cached[1] and end<=cached[2]+1e-7:return cached[3],cached[1],scale
+        tile_start=max(0,start-span);tile_end=min(self.length,tile_start+3*span)
+        width=max(1,int(np.ceil((tile_end-tile_start)*scale)))
+        image=QImage(width,self.height(),QImage.Format.Format_ARGB32_Premultiplied);image.fill(Qt.GlobalColor.transparent)
+        n=len(self.peaks);edges=np.minimum(n-1,np.maximum(0,((tile_start+np.arange(width+1)/scale)/max(.001,self.length)*n).astype(int)))
+        if getattr(self,'_peaks_identity',None)!=id(self.peaks):self._peak_array=np.asarray(self.peaks,dtype=np.float32);self._peaks_identity=id(self.peaks)
+        values=np.maximum.reduceat(self._peak_array,edges)[:-1]
+        # reduceat's final bin is discarded; clip the tile to the actual signal extent.
+        middle=self.height()/2 if self.overview else self.height()/2+6
+        amplitude=max(2,self.height()/2-4 if self.overview else self.height()/2-17)
+        colors=None;energies=None
+        if self.mode=='Rekordbox RGB' and self.native_colors is not None:
+            heights,cols=self.native_colors;idx=np.minimum(len(heights)-1,((tile_start+np.arange(width+1)/scale)/max(.001,self.length)*len(heights)).astype(int))
+            values=np.maximum.reduceat(heights,idx)[:-1];colors=(cols[idx[:-1]]*255).astype(np.uint8)
+        elif self.mode in {'RGB','3 band'} and self.bands is not None and len(self.bands):
+            energies=np.maximum.reduceat(np.asarray(self.bands),edges,axis=0)[:-1]
+            energies=energies/np.maximum(.001,energies.max(axis=1))[:,None]
+            colors=np.clip((.18+.82*energies)*255,0,255).astype(np.uint8)
+        painter=QPainter(image);base=QColor('#58b8f1' if self.mode=='Blue' else theme['accent']['start'])
+        for x,value in enumerate(values):
+            h=float(value)*amplitude
+            if self.mode=='3 band' and energies is not None:
+                for band,col in sorted(zip(energies[x],['#ed745d','#57cfa9','#65aaf7']),reverse=True):
+                    painter.setPen(QColor(col));v=float(band)*h;painter.drawLine(x,int(middle-v),x,int(middle+v))
+            else:
+                painter.setPen(QColor(*map(int,colors[x])) if colors is not None else base);painter.drawLine(x,int(middle-h),x,int(middle+h))
+        painter.end();self.cache_builds=getattr(self,'cache_builds',0)+1
+        self._wave_cache=(key,tile_start,tile_end,image)
+        return image,tile_start,scale
     def mousePressEvent(self,event):
         if event.button()==Qt.MouseButton.LeftButton and self.length:
             self.seek.emit(int(self.seconds_at(event.position().x())*1000))
@@ -169,13 +191,18 @@ class MusicPlayer(QWidget):
         self.media.playbackStateChanged.connect(self.playback_changed)
         self.media.positionChanged.connect(self.position_changed);self.media.durationChanged.connect(self.duration_changed)
         self.media.errorOccurred.connect(lambda *_:owner.status.setText('Playback: '+self.media.errorString()))
+        self._clock_position=0;self._clock_time=time.monotonic()
+        self.frame_timer=QTimer(self);self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer);self.frame_timer.setInterval(16);self.frame_timer.timeout.connect(self.animate)
         self.hide()
+    def animate(self):
+        value=min(self.media.duration(),self._clock_position+(time.monotonic()-self._clock_time)*1000*self.media.playbackRate())
+        for wave in [self.wave,self.overview]:wave.position=value;wave.update()
     def load(self,path,title,cues=(),autoplay=True,analysis=()):
         path=Path(path)
         if not path.is_file():raise ValueError('This track needs an available local file for playback')
         for job in self.jobs:job.cancel.set()
         self.path=str(path.resolve())
-        for wave in [self.wave,self.overview]:wave.peaks=[];wave.bands=None;wave.native_colors=None;wave.beats=[];wave.length=0;wave.position=0;wave.cues=list(cues);wave.update()
+        for wave in [self.wave,self.overview]:wave.peaks=[];wave.bands=None;wave.native_colors=None;wave.beats=[];wave.length=0;wave.position=0;wave.cues=list(cues);wave._wave_cache=None;wave._peaks_identity=None;wave.update()
         self.grid.setEnabled(False);self.info.setText('Reading waveform…')
         self.title.setText(title);self.title.setToolTip(title);self.cue_choice.clear();self.cue_choice.addItem('Jump to cue…',None)
         for cue in cues:self.cue_choice.addItem(cue['label'],int(cue['position']*1000))
@@ -192,13 +219,17 @@ class MusicPlayer(QWidget):
         if path!=self.path:return
         if not isinstance(peaks,dict):peaks={'peaks':peaks}
         for wave in [self.wave,self.overview]:
-            wave.peaks=peaks['peaks'];wave.bands=peaks.get('bands');wave.native_colors=peaks.get('native_colors');wave.beats=peaks.get('beats',[]);wave.length=length;wave.update()
+            wave.peaks=peaks['peaks'];wave.bands=peaks.get('bands');wave.native_colors=peaks.get('native_colors');wave.beats=peaks.get('beats',[]);wave.length=length;wave._wave_cache=None;wave._peaks_identity=None;wave.update()
         available=bool(peaks.get('beats'));self.grid.setEnabled(available);self.grid.setToolTip('Existing Rekordbox beatgrid · read only' if available else 'No existing Rekordbox beatgrid for this track')
         self.info.setText(f"Rekordbox beatgrid · {len(peaks['beats'])} beats · read only" if available else 'Audio frequency analysis · no Rekordbox beatgrid')
         if peaks.get('analysis_error'):self.info.setText('Rekordbox analysis unavailable · using audio frequency analysis')
         if peaks.get('native_colors') is None and self.colors.currentText()=='Rekordbox RGB':self.info.setText(self.info.text()+' · native colours unavailable, using accent')
     def playback_changed(self,state):
         self.play.playing=state==QMediaPlayer.PlaybackState.PlayingState
+        self._clock_position=self.media.position();self._clock_time=time.monotonic()
+        if hasattr(self,'frame_timer'):
+            if self.play.playing:self.frame_timer.start()
+            else:self.frame_timer.stop();self.position_changed(self.media.position())
         label='Pause' if self.play.playing else 'Play';self.play.setToolTip(label);self.play.setAccessibleName(label);self.play.update()
     def set_color(self,mode,persist=True):
         for wave in [self.wave,self.overview]:wave.mode=mode;wave.update()
@@ -207,6 +238,7 @@ class MusicPlayer(QWidget):
     def set_zoom(self,value):
         zoom=2**value;self.wave.zoom=zoom;self.overview.zoom=zoom;self.zoom_label.setText(f'{zoom}×');self.wave.update();self.overview.update()
     def position_changed(self,value):
+        self._clock_position=value;self._clock_time=time.monotonic()
         for wave in [self.wave,self.overview]:wave.position=value;wave.update()
         self.update_time()
     def duration_changed(self,value):
@@ -226,6 +258,6 @@ class MusicPlayer(QWidget):
         for job in self.jobs:job.cancel.set()
         self.hide()
     def shutdown(self):
-        self.media.stop();self.media.setSource(QUrl())
+        self.frame_timer.stop();self.media.stop();self.media.setSource(QUrl())
         for job in list(self.jobs):job.cancel.set()
         return all(job.wait(2000) for job in list(self.jobs))

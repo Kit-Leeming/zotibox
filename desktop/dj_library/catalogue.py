@@ -128,6 +128,15 @@ class Catalogue:
             if 'finished_at' not in {row['name'] for row in db.execute('PRAGMA table_info(downloads)')}:
                 db.execute("ALTER TABLE downloads ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''")
                 db.execute("UPDATE downloads SET finished_at=created WHERE state='complete'")
+            if 'bpm' not in {row['name'] for row in db.execute('PRAGMA table_info(files)')}:
+                db.execute('ALTER TABLE files ADD COLUMN bpm REAL NOT NULL DEFAULT 0')
+                db.execute('UPDATE files SET bpm=-1')
+        if not self.get_setting('audio_preferences_v2',False):
+            options=self.get_setting('zotify_options',{})
+            old=options.get('DOWNLOAD_FORMAT','flac')
+            options['DOWNLOAD_FORMAT']='auto' if old=='flac' else 'original' if old in {'copy','aac','ogg','opus','vorbis'} else old if old=='mp3' else 'auto'
+            if options.get('DOWNLOAD_QUALITY','auto')=='auto':options['DOWNLOAD_QUALITY']='lossless'
+            self.set_setting('zotify_options',options);self.set_setting('audio_preferences_v2',True)
         if not self.bindings_path.exists():
             atomic_json(self.bindings_path, {"roots": {}})
 
@@ -147,7 +156,11 @@ class Catalogue:
             db.close()
 
     def bindings(self):
-        return json.loads(self.bindings_path.read_text(encoding="utf-8"))["roots"]
+        stat=self.bindings_path.stat();stamp=(stat.st_mtime_ns,stat.st_size,stat.st_ino)
+        cached=getattr(self,'_bindings_cache',None)
+        if cached is None or cached[0]!=stamp:
+            cached=(stamp,json.loads(self.bindings_path.read_text(encoding='utf-8'))['roots']);self._bindings_cache=cached
+        return dict(cached[1])
 
     def roots(self):
         bindings = self.bindings()
@@ -238,8 +251,9 @@ class Catalogue:
                             with self.connect() as db:
                                 old = db.execute("SELECT * FROM files WHERE root_id=? AND relative_path=?", (root["id"], relative)).fetchone()
                             if old and old["size"] == stat.st_size and old["mtime_ns"] == stat.st_mtime_ns:
+                                bpm=read_metadata(path)['bpm'] if old['bpm']<0 else old['bpm']
                                 with self.connect() as db:
-                                    db.execute("UPDATE files SET available=1 WHERE id=?", (old["id"],))
+                                    db.execute("UPDATE files SET available=1,bpm=? WHERE id=?", (bpm,old["id"]))
                                 result["unchanged"] += 1
                             else:
                                 metadata = read_metadata(path)
@@ -264,6 +278,7 @@ class Catalogue:
                                                (file_id, recording_id, root["id"], relative, digest, stat.st_size, stat.st_mtime_ns,
                                                 metadata["codec"], metadata["bitrate"], metadata["sample_rate"], metadata["bits"],
                                                 getattr(stat, "st_birthtime_ns", int(stat.st_ctime * 1e9)), old["indexed_at"] if old else now()))
+                                    db.execute('UPDATE files SET bpm=? WHERE id=?',(metadata['bpm'],file_id))
                                     self.change(db, "file", file_id, "index")
                                 result["indexed"] += 1
                         progress(result["indexed"] + result["unchanged"], relative)
@@ -328,7 +343,7 @@ class Catalogue:
     def entries(self, playlist_id):
         with self.connect() as db:
             return [dict(row) for row in db.execute("""SELECT e.*,coalesce(t.title,r.title) AS title,coalesce(t.artist,r.artist) AS artist,
-                coalesce(t.duration,r.duration,0) AS duration FROM entries e LEFT JOIN recordings r ON r.id=e.recording_id
+                coalesce(t.duration,r.duration,0) AS duration,coalesce((SELECT max(bpm) FROM files WHERE recording_id=e.recording_id AND available=1),0) AS bpm FROM entries e LEFT JOIN recordings r ON r.id=e.recording_id
                 LEFT JOIN remote_tracks t ON t.id=e.spotify_id WHERE playlist_id=? ORDER BY position,e.id""", (playlist_id,))]
 
     def reorder(self, playlist_id, entry_ids):
@@ -624,13 +639,17 @@ def read_metadata(path):
         raise ValueError("Unsupported or unreadable audio file")
     tags = audio.tags or {}
     def tag(key, default=""):
-        id3_key = {"title": "TIT2", "artist": "TPE1", "album": "TALB", "isrc": "TSRC"}.get(key)
+        id3_key = {"title": "TIT2", "artist": "TPE1", "album": "TALB", "isrc": "TSRC",'bpm':'TBPM'}.get(key)
         value = tags.get(key) or (tags.get(id3_key) if id3_key else None) or [default]
         if hasattr(value, "text"):
             value = value.text
         return str(value[0] if isinstance(value, list) else value)
     info = audio.info
+    try:
+        bpm=float(tag('bpm') or tag('tempo') or 0)
+        if not 0<bpm<1000:bpm=0
+    except (ValueError,TypeError):bpm=0
     return {"title": tag("title", path.stem), "artist": tag("artist"), "album": tag("album"),
-            "isrc": tag("isrc"), "duration": float(getattr(info, "length", 0)),
+            "isrc": tag("isrc"), "duration": float(getattr(info, "length", 0)), 'bpm':bpm,
             "codec": str(getattr(info, "codec_description", "") or path.suffix.lstrip(".").upper()), "bitrate": int(getattr(info, "bitrate", 0) or 0),
             "sample_rate": int(getattr(info, "sample_rate", 0) or 0), "bits": int(getattr(info, "bits_per_sample", 0) or 0)}
