@@ -1,5 +1,5 @@
 #define AppName "ZotiBox"
-#define AppVersion "0.12.0"
+#define AppVersion "0.13.0"
 
 [Setup]
 AppId={{B2AD5EB7-0914-41C6-9482-ED8187149302}
@@ -14,7 +14,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\dist
-OutputBaseFilename=ZotiBox-Setup-0.12.0
+OutputBaseFilename=ZotiBox-Setup-0.13.0
 Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
@@ -29,8 +29,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "..\.build-work\distribution\ZotiBox\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\ZotiBox"; Filename: "{app}\ZotiBox.exe"
-Name: "{autodesktop}\ZotiBox"; Filename: "{app}\ZotiBox.exe"; Tasks: desktopicon
+Name: "{group}\ZotiBox"; Filename: "{app}\ZotiBox.exe"; AppUserModelID: "ZotiBox.Desktop"
+Name: "{autodesktop}\ZotiBox"; Filename: "{app}\ZotiBox.exe"; Tasks: desktopicon; AppUserModelID: "ZotiBox.Desktop"
 
 [Run]
 Filename: "{app}\ZotiBox.exe"; Description: "Open ZotiBox"; Flags: nowait postinstall skipifsilent

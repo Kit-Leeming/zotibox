@@ -21,6 +21,8 @@ def log_startup(message):
     except OSError:pass
 
 def main():
+    from .taskbar import identify
+    identify()
     started=time.monotonic()
     parser=argparse.ArgumentParser(description="ZotiBox desktop")
     parser.add_argument("--workspace",type=Path)

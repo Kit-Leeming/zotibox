@@ -60,7 +60,8 @@ class Catalogue:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.db_path = self.workspace / "catalogue.sqlite3"
         self.bindings_path = self.workspace / "machine.json"
-        self.scan_lock = threading.Lock()
+        self.scan_lock = threading.RLock()
+        self.file_revision = 0
         if self.db_path.exists() and self.db_path.stat().st_size:
             existing=sqlite3.connect(self.db_path.as_uri()+"?mode=ro",uri=True)
             try:
@@ -91,6 +92,8 @@ class Catalogue:
                     UNIQUE(root_id, relative_path));
                 CREATE INDEX IF NOT EXISTS files_hash ON files(sha256);
                 CREATE TABLE IF NOT EXISTS retired_files(sha256 TEXT PRIMARY KEY,recording_id TEXT NOT NULL REFERENCES recordings(id));
+                CREATE TABLE IF NOT EXISTS recording_versions(recording_id TEXT PRIMARY KEY REFERENCES recordings(id),
+                    preferred_id TEXT NOT NULL REFERENCES recordings(id));
                 CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', spotify_id TEXT,
                     snapshot TEXT, synced_at TEXT, rekordbox_id TEXT);
                 CREATE TABLE IF NOT EXISTS remote_tracks(id TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL,
@@ -232,28 +235,36 @@ class Catalogue:
                 result["errors"].append(f"{root['name']}: folder is not available; existing records retained")
                 continue
             seen = set()
+            # One persistent manifest read per root. Always enumerate/stat files:
+            # directory timestamps cannot detect edits to an existing audio file.
+            with self.connect() as db:
+                manifest={r['relative_path']:dict(r) for r in db.execute('SELECT * FROM files WHERE root_id=?',(root['id'],))}
             walk_errors = []
             walk=[(str(only_path.parent), [], [only_path.name])] if only_path else os.walk(folder, followlinks=False, onerror=walk_errors.append)
             for directory, subdirs, names in walk:
-                subdirs[:] = [name for name in subdirs if not (Path(directory) / name).is_symlink()
+                subdirs[:] = [name for name in subdirs if not name.casefold().startswith('.zotibox-') and not (Path(directory) / name).is_symlink()
                               and not (Path(directory) / name).is_junction()]
                 for name in names:
                     if cancel.is_set():
                         raise InterruptedError("Scan cancelled; indexed files have been saved")
                     path = Path(directory) / name
-                    if path.suffix.lower() not in AUDIO_EXTENSIONS or path.is_symlink():
+                    if name.casefold().startswith('.zotibox-') or path.suffix.lower() not in AUDIO_EXTENSIONS or path.is_symlink():
                         continue
                     relative = path.relative_to(folder).as_posix()
                     seen.add(relative)
                     try:
                         with self.scan_lock:
                             stat = path.stat()
-                            with self.connect() as db:
-                                old = db.execute("SELECT * FROM files WHERE root_id=? AND relative_path=?", (root["id"], relative)).fetchone()
+                            old = manifest.get(relative)
+                            if old is None:
+                                with self.connect() as db:
+                                    old=db.execute('SELECT * FROM files WHERE root_id=? AND relative_path=?',(root['id'],relative)).fetchone()
                             if old and old["size"] == stat.st_size and old["mtime_ns"] == stat.st_mtime_ns:
                                 bpm=read_metadata(path)['bpm'] if old['bpm']<0 else old['bpm']
-                                with self.connect() as db:
-                                    db.execute("UPDATE files SET available=1,bpm=? WHERE id=?", (bpm,old["id"]))
+                                if not old['available'] or bpm!=old['bpm']:
+                                    with self.connect() as db:
+                                        db.execute("UPDATE files SET available=1,bpm=? WHERE id=?", (bpm,old["id"]))
+                                    self.file_revision+=1
                                 result["unchanged"] += 1
                             else:
                                 metadata = read_metadata(path)
@@ -281,6 +292,7 @@ class Catalogue:
                                     db.execute('UPDATE files SET bpm=? WHERE id=?',(metadata['bpm'],file_id))
                                     self.change(db, "file", file_id, "index")
                                 result["indexed"] += 1
+                                self.file_revision+=1
                         progress(result["indexed"] + result["unchanged"], relative)
                     except InterruptedError:
                         raise
@@ -299,14 +311,52 @@ class Catalogue:
                         db.execute("UPDATE files SET available=0 WHERE id=?", (row["id"],))
                         self.change(db, "file", row["id"], "missing")
                         result["missing"] += 1
+                        self.file_revision+=1
+        return result
+
+    def effective_recording(self,recording_id):
+        with self.connect() as db:
+            versions=dict(db.execute('SELECT recording_id,preferred_id FROM recording_versions'))
+        seen=set()
+        while recording_id in versions:
+            if recording_id in seen:raise ValueError('Preferred version contains a cycle')
+            seen.add(recording_id);recording_id=versions[recording_id]
+        return recording_id
+
+    def prefer_version(self,recording_id,preferred_id):
+        if not recording_id or not preferred_id or recording_id==preferred_id:raise ValueError('Choose a different recording')
+        if self.effective_recording(preferred_id)==recording_id:raise ValueError('This would create a preferred-version cycle')
+        if not self.available_recording(preferred_id):raise ValueError('The preferred version must be available locally')
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO recording_versions VALUES (?,?)',(recording_id,preferred_id))
+            self.change(db,'recording',recording_id,'prefer '+preferred_id)
+
+    def clear_preferred_version(self,recording_id):
+        with self.connect() as db:
+            db.execute('DELETE FROM recording_versions WHERE recording_id=?',(recording_id,))
+            self.change(db,'recording',recording_id,'clear preferred version')
+        hidden=set(self.get_setting('hidden_version_recordings',[]));hidden.discard(recording_id)
+        self.set_setting('hidden_version_recordings',sorted(hidden))
+
+    def recent_files(self,limit=10):
+        with self.connect() as db:overridden={r[0] for r in db.execute('SELECT recording_id FROM recording_versions')}
+        rows=[r for r in self.files() if r['available'] and r['recording_id'] not in overridden]
+        rows.sort(key=lambda r:(r['indexed_at'],r['created_ns']),reverse=True)
+        result=[];seen=set()
+        for row in rows:
+            if row['recording_id'] in seen:continue
+            path=self.resolve(row)
+            if path and path.is_file():
+                seen.add(row['recording_id']);result.append(dict(row,output=str(path),kind='file'))
+            if len(result)>=limit:break
         return result
 
     def files(self, query="", duplicates=False):
         with self.connect() as db:
-            rows = db.execute("""SELECT f.*,r.title,r.artist,r.album,r.isrc,r.duration,roots.name AS root_name,
+            rows = db.execute("""SELECT f.*,r.title,r.artist,r.album,r.isrc,r.duration,roots.name AS root_name,(f.id=r.preferred_file_id) AS preferred,
                 (SELECT count(*) FROM files d WHERE d.sha256=f.sha256) AS copies
                 FROM files f JOIN recordings r ON r.id=f.recording_id JOIN roots ON roots.id=f.root_id
-                ORDER BY r.artist COLLATE NOCASE,r.title COLLATE NOCASE,f.relative_path""").fetchall()
+                ORDER BY (f.id=r.preferred_file_id) DESC,r.artist COLLATE NOCASE,r.title COLLATE NOCASE,f.relative_path""").fetchall()
         needle = query.casefold()
         return [dict(row) for row in rows if (not duplicates or row["copies"] > 1) and
                 (not needle or needle in " ".join(str(row[key]) for key in ("title", "artist", "album", "relative_path", "isrc")).casefold())]
@@ -342,9 +392,16 @@ class Catalogue:
 
     def entries(self, playlist_id):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("""SELECT e.*,coalesce(t.title,r.title) AS title,coalesce(t.artist,r.artist) AS artist,
+            rows=[dict(row) for row in db.execute("""SELECT e.*,coalesce(t.title,r.title) AS title,coalesce(t.artist,r.artist) AS artist,
                 coalesce(t.duration,r.duration,0) AS duration,coalesce((SELECT max(bpm) FROM files WHERE recording_id=e.recording_id AND available=1),0) AS bpm FROM entries e LEFT JOIN recordings r ON r.id=e.recording_id
                 LEFT JOIN remote_tracks t ON t.id=e.spotify_id WHERE playlist_id=? ORDER BY position,e.id""", (playlist_id,))]
+            for row in rows:
+                effective=self.effective_recording(row['recording_id'])
+                if effective!=row['recording_id']:
+                    row['original_recording_id']=row['recording_id'];row['recording_id']=effective
+                    preferred=db.execute('SELECT title,artist,duration FROM recordings WHERE id=?',(effective,)).fetchone()
+                    row.update(dict(preferred));row['match_state']='preferred version'
+            return rows
 
     def reorder(self, playlist_id, entry_ids):
         with self.connect() as db:
@@ -411,6 +468,7 @@ class Catalogue:
         atomic_json(self.bindings_path, {"roots": bindings})
 
     def available_recording(self, recording_id):
+        recording_id=self.effective_recording(recording_id)
         with self.connect() as db:
             rows = db.execute("SELECT * FROM files WHERE recording_id=? AND available=1", (recording_id,)).fetchall()
         return any((path := self.resolve(row)) and path.is_file() for row in rows)

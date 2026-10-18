@@ -58,5 +58,15 @@ from dj_library.playlist_compare import ComparisonDialog,playlist_sources
 dialog=ComparisonDialog(playlist_sources(c,{}),window,initial=['local:'+p,'local:'+compare_id]);dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen);dialog.show()
 for _ in range(20):app.processEvents();time.sleep(.01)
 dialog.grab().save(str(output/'comparison.png'));dialog.close()
+from dj_library.organisation_ui import OrganiseDialog
+dialog=OrganiseDialog(window);dialog.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+plan=dialog.service.plan('consolidate',workspace/'Output')
+dialog.display_plan(plan);dialog.destination.setText(r'C:\Music\ZotiBox')
+for i,row in enumerate(plan['rows']):
+    dialog.preview.item(i,0).setText('D:\\Music\\'+Path(row['source']).name)
+    dialog.preview.item(i,1).setText('C:\\Music\\ZotiBox\\'+Path(row['target']).name)
+dialog.show()
+for _ in range(20):app.processEvents();time.sleep(.01)
+dialog.grab().save(str(output/'organisation.png'));dialog.close()
 window.download_job=None;window.close()
 print('Captured demo screenshots in docs/images')

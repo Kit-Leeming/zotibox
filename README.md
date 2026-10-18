@@ -9,6 +9,7 @@ A Windows desktop app for organising local music, keeping Spotify playlists in s
 ## What it does
 
 - Index music in existing folders, find duplicates and match local files to Spotify tracks.
+- Cache unchanged scans, consolidate or move music with reviewed Rekordbox relinks, and choose preferred extended mixes. See [local music organisation](docs/LOCAL-MUSIC.md).
 - Keep linked playlists in Spotify order, review uncertain matches and queue missing tracks across the library.
 - Download tracks, albums and playlists into one shared music folder, with progress and an estimated finish time.
 - Preview playlist and metadata changes for Rekordbox, then apply them with verified backups.
@@ -70,8 +71,10 @@ For Spotify on your phone, right-click a linked playlist → **Export local extr
 
 ## Backups and current limits
 
+![Reviewed local file organisation](docs/images/organisation.png)
+
 - Rekordbox can stay open for viewing and preparing previews. Close it before Backup, Apply or Restore. Database writes are disabled initially. Apply reuses its verified backup while the native library matches the last successful ZotiBox apply; external changes or a missing backup require a new one. Restore always makes a recovery backup. A visible warning indicates when Rekordbox is running. External music files are not included in those backups.
-- Track identities, existing cues and analysis data are preserved where possible. New tracks need Rekordbox analysis. Waveforms offer RGB, 3 band, blue, accent and existing Rekordbox RGB modes, with zoom and an overview strip. Existing beatgrids and cue markers are read-only; missing grids are not invented. Cue/grid editing and automatic structural cues are future work, and and metadata edits affect the Rekordbox database rather than audio-file tags.
+- Track identities, existing cues and analysis data are preserved where possible. New tracks need Rekordbox analysis. Waveforms offer RGB, 3 band, blue, accent and existing Rekordbox RGB modes, with zoom and an overview strip. Existing beatgrids and cue markers are read-only; missing grids are not invented. Cue/grid editing and automatic structural cues are future work. Metadata edits affect the Rekordbox database rather than audio-file tags.
 - Zotify downloads one track at a time, with real-time pacing by default. Finish estimates exclude login, conversion and retry delays. Auto output prefers a Spotify FLAC stream and falls back to MP3 320 kbps. Original output preserves the source format. Older Ogg/Opus files get verified MP3 compatibility copies when added to Rekordbox; originals are retained. MP3 conversion adds another lossy encoding step. Source-format information verifies the delivered stream, not the original studio master or previously imported files.
 - Spotify playlist folders are unavailable through the Web API. ZotiBox provides its own folders. Automatic PC-to-PC sync is not included; manual `.zotibox` export/import is available.
 

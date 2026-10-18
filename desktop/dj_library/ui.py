@@ -459,14 +459,14 @@ class Window(QMainWindow):
         layout.addLayout(bar)
         self.connection_summary=muted("")
         layout.addWidget(self.connection_summary)
-        layout.addWidget(QLabel("Recently downloaded"))
-        self.recent_table=self.table(["Title","Artist","Downloaded file"])
+        layout.addWidget(QLabel("Recently added"))
+        self.recent_table=self.table(["Title","Artist","Local file"])
         self.recent_table.setMaximumHeight(260)
         self.recent_table.setColumnWidth(0,360);self.recent_table.setColumnWidth(1,250)
         self.recent_table.itemDoubleClicked.connect(lambda item:self.play_row(item.data(ROLE)))
         self.recent_table.customContextMenuRequested.connect(self.recent_context)
         layout.addWidget(self.recent_table,1)
-        self.recent_empty=muted("Completed downloads will appear here.");layout.addWidget(self.recent_empty)
+        self.recent_empty=muted("Scanned music and completed downloads will appear here.");layout.addWidget(self.recent_empty)
         layout.addStretch()
 
     def build_downloads(self):
@@ -523,6 +523,7 @@ class Window(QMainWindow):
         remove=QAction(self.downloads_table);remove.setShortcut(QKeySequence('Delete'));remove.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         remove.triggered.connect(self.remove_selected_downloads);self.downloads_table.addAction(remove)
         self.download_tabs.addTab(self.downloads_table,"Download queue")
+        self.download_tabs.setCurrentIndex(1)
         self.queue_summary=muted("Queue empty")
         layout.addWidget(self.queue_summary)
         row=QHBoxLayout()
@@ -553,6 +554,7 @@ class Window(QMainWindow):
         bar.addWidget(self.duplicates)
         bar.addWidget(self.row_size_control())
         bar.addWidget(self.button("Add folder",self.add_root,"SP_DirOpenIcon"))
+        bar.addWidget(self.button('Organise…',self.organise_library,'SP_DirIcon'))
         self.add_library_button=self.button("Add selected to playlist",self.add_selected,"SP_FileDialogListView");self.add_library_button.hide();bar.addWidget(self.add_library_button)
         layout.addLayout(bar)
         tree=self.files_table=LibraryTree(lambda:self.theme)
@@ -566,6 +568,8 @@ class Window(QMainWindow):
         tree.setIconSize(QSize(height-8,height-8))
         tree.verticalScrollBar().valueChanged.connect(lambda *_:self.artwork_timer.start())
         tree.itemExpanded.connect(lambda *_:self.artwork_timer.start())
+        tree.itemExpanded.connect(self.save_library_view)
+        tree.itemCollapsed.connect(self.save_library_view)
         tree.setAllColumnsShowFocus(False)
         tree.setItemDelegate(RowDelegate(tree,lambda:self.theme))
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -576,6 +580,9 @@ class Window(QMainWindow):
         for index,width in enumerate([330,190,200,80,70,165,140]):
             tree.setColumnWidth(index,width)
         tree.setColumnWidth(8,75);tree.header().moveSection(8,5)
+        saved_sort=self.catalogue.get_setting('library_sort',[0,0])
+        tree.header().setSortIndicator(saved_sort[0],Qt.SortOrder(saved_sort[1]))
+        tree.header().sortIndicatorChanged.connect(lambda col,order:self.catalogue.set_setting('library_sort',[col,order.value]))
         layout.addWidget(tree,1)
         self.details=muted("BPM uses file tags or the loaded Rekordbox preview. Scan folders to read existing BPM tags; blank means unavailable.")
         layout.addWidget(self.details)
@@ -743,6 +750,7 @@ class Window(QMainWindow):
         bar.addWidget(self.download_folder,1)
         bar.addWidget(self.button("Choose download folder…",self.choose_download_folder,"SP_DirOpenIcon"))
         form.addLayout(bar)
+        form.addWidget(self.button('Move existing music / consolidate…',self.organise_library,'SP_DirIcon'))
         self.auto_download=QCheckBox("Automatically download missing tracks after a Spotify sync")
         self.auto_download.setChecked(self.catalogue.get_setting("auto_download",False))
         self.auto_download.toggled.connect(lambda value:self.catalogue.set_setting("auto_download",value))
@@ -1027,6 +1035,12 @@ class Window(QMainWindow):
         self._thumb_bindings=self.catalogue.bindings()
         selected_ids={row["id"] for row in self.selected_files()}
         scroll=self.files_table.verticalScrollBar().value()
+        horizontal=self.files_table.horizontalScrollBar().value()
+        column=self.files_table.header().sortIndicatorSection()
+        order=self.files_table.header().sortIndicatorOrder()
+        first_load=not getattr(self,'_library_loaded',False)
+        known_roots=set(self.catalogue.get_setting('library_known_roots',[])) if first_load else {
+            (self.files_table.topLevelItem(i).data(0,ROLE) or {}).get('root_id') for i in range(self.files_table.topLevelItemCount())}
         expanded=set()
         def walk(item):
             data=item.data(0,ROLE) or {}
@@ -1036,6 +1050,7 @@ class Window(QMainWindow):
                 walk(item.child(index))
         for index in range(self.files_table.topLevelItemCount()):
             walk(self.files_table.topLevelItem(index))
+        if first_load:expanded={tuple(v) for v in self.catalogue.get_setting('library_expanded',[])}
         block=QSignalBlocker(self.files_table)
         self.files_table.setSortingEnabled(False)
         self.files_table.clear()
@@ -1045,11 +1060,13 @@ class Window(QMainWindow):
             item.setData(0,ROLE,{"kind":"folder","root_id":root["id"],"folder":""})
             item.setIcon(0,self.icon("SP_DirIcon"))
             self.files_table.addTopLevelItem(item)
-            item.setExpanded(True)
+            item.setExpanded(root['id'] not in known_roots or (root['id'],'') in expanded)
             roots[root["id"]]=item
         folders={}
         native_bpms={os.path.normcase(t['path']):t.get('bpm',0) for t in self.rb_panel.data['tracks']}
+        hidden=set(self.catalogue.get_setting('hidden_version_recordings',[]))
         for row in self.catalogue.files(self.search.text(),self.duplicates.isChecked()):
+            if row['recording_id'] in hidden:continue
             parent=roots[row["root_id"]]
             parts=PurePosixPath(row["relative_path"]).parts
             for depth,part in enumerate(parts[:-1]):
@@ -1080,9 +1097,22 @@ class Window(QMainWindow):
             if row["id"] in selected_ids:
                 item.setSelected(True)
         self.files_table.setSortingEnabled(True)
-        self.files_table.sortItems(0,Qt.SortOrder.AscendingOrder)
+        self.files_table.sortItems(max(0,column),order)
         self.files_table.verticalScrollBar().setValue(scroll)
+        self.files_table.horizontalScrollBar().setValue(horizontal)
+        self._library_loaded=True
         del block
+
+    def save_library_view(self,*_):
+        if self.files_table.signalsBlocked():return
+        expanded=[]
+        def visit(item):
+            data=item.data(0,ROLE) or {}
+            if item.isExpanded() and data.get('kind')=='folder':expanded.append([data['root_id'],data['folder']])
+            for i in range(item.childCount()):visit(item.child(i))
+        for i in range(self.files_table.topLevelItemCount()):visit(self.files_table.topLevelItem(i))
+        self.catalogue.set_setting('library_expanded',expanded)
+        self.catalogue.set_setting('library_known_roots',[(self.files_table.topLevelItem(i).data(0,ROLE) or {})['root_id'] for i in range(self.files_table.topLevelItemCount())])
 
     def fill_table(self,table,rows,values):
         self._thumb_bindings=self.catalogue.bindings()
@@ -1206,7 +1236,7 @@ class Window(QMainWindow):
         jobs=self.catalogue.download_jobs()
         self.refresh_global_playlist_controls()
         self.update_download_controls()
-        recent=[j for j in sorted(jobs,key=lambda j:j['finished_at'] or j['created'],reverse=True) if j["state"]=="complete" and j["output"]][:10]
+        recent=self.catalogue.recent_files()
         self.fill_table(self.recent_table,recent,lambda i,r:[r["title"],r["artist"],Path(r["output"]).name])
         self.recent_table.setVisible(bool(recent));self.recent_empty.setVisible(not recent)
         if not getattr(self.downloads_table,'_dragging',False):self.refresh_queue_table(jobs)
@@ -1412,12 +1442,15 @@ class Window(QMainWindow):
             self.status.setText("Cancelling task…")
 
     def scan(self):
+        if self.job and self.job.property('exclusive_files'):
+            self.status.setText('Finish the file organisation operation before scanning');return
         if self.scan_job:
             self.status.setText("Local discovery is already running")
             return
         if not self.catalogue.roots():
             self.add_root()
         if self.catalogue.roots():
+            self._scan_revision=self.catalogue.file_revision
             self.scan_job=Job(lambda progress,cancel:self.catalogue.scan(progress,cancel),self)
             self.scan_job.progress.connect(self.scan_progress)
             self.scan_job.finished_result.connect(self.scan_complete)
@@ -1430,7 +1463,8 @@ class Window(QMainWindow):
 
     def scan_progress(self,count,name):
         self.status.setText(f"Local discovery · {count} files · {name}")
-        if not self.library_refresh.isActive():
+        if getattr(self,'_scan_revision',None)!=self.catalogue.file_revision and not self.library_refresh.isActive():
+            self._scan_revision=self.catalogue.file_revision
             self.library_refresh.start()
 
     def scan_finished(self):
@@ -1795,6 +1829,8 @@ class Window(QMainWindow):
         QMessageBox.information(self,'Last download diagnostic',text)
 
     def start_downloads(self):
+        if self.job and self.job.property('exclusive_files'):
+            self.status.setText('Finish the file organisation operation before downloading');return
         if self.download_job:
             return
         self.download_job=Job(lambda progress,cancel:self.engine.run_queue(),self)
@@ -1894,6 +1930,11 @@ class Window(QMainWindow):
             palette.setColor(role,QColor(self.theme[key]["start"]))
         self.setPalette(palette)
         self.setWindowIcon(QIcon(QPixmap.fromImage(icon_image(accent=self.theme["accent"]["start"]))))
+        QApplication.instance().setWindowIcon(self.windowIcon())
+        from .taskbar import refresh_icon
+        icon_path=self.catalogue.workspace/'.local'/'ui'/('app-'+self.theme['accent']['start'].lstrip('#')+'.ico')
+        if not icon_path.exists():save_icon(icon_path,self.theme['accent']['start'])
+        refresh_icon(self,icon_path)
         for control in self.findChildren(QPushButton):
             name=control.property("icon_name")
             if name:
@@ -2035,6 +2076,8 @@ class Window(QMainWindow):
             menu.addAction("File details",lambda:self.show_file_details(row))
             menu.addAction("Show in File Explorer",lambda:self.explorer(self.catalogue.resolve(row)))
             menu.addAction("Add selected to playlist",self.add_selected)
+            menu.addAction('Use a preferred / extended version…',lambda:self.preferred_version(row))
+            menu.addAction('Find and embed missing artwork…',lambda:self.organise_library(3))
             menu.addAction("Copy file path",lambda:QApplication.clipboard().setText(str(self.catalogue.resolve(row))))
             menu.addSeparator()
             menu.addAction("Delete selected files…",self.delete_selected_files)
@@ -2045,6 +2088,18 @@ class Window(QMainWindow):
             if not row["folder"]:
                 menu.addAction("Remove scanned folder",lambda:self.remove_root(root_id=row["root_id"]))
         menu.exec(self.files_table.viewport().mapToGlobal(point))
+
+    def organise_library(self,tab=0):
+        from .organisation_ui import OrganiseDialog
+        OrganiseDialog(self,int(tab)).exec()
+
+    def preferred_version(self,row):
+        from .organisation_ui import VersionDialog
+        VersionDialog(self,row).exec()
+
+    def find_extended_versions(self,playlist_id=None):
+        from .organisation_ui import ExtendedSearch
+        ExtendedSearch(self,playlist_id).exec()
 
     def playlist_context(self,point):
         item=self.playlist_list.itemAt(point)
@@ -2074,6 +2129,7 @@ class Window(QMainWindow):
         playlist=item.data(ROLE)
         menu=QMenu(self)
         menu.addAction('Compare with another playlist…',lambda:self.compare_playlists(['local:'+playlist['id']]))
+        menu.addAction('Find extended versions…',lambda:self.find_extended_versions(playlist['id']))
         menu.addAction("Rename playlist…",self.rename_current_playlist)
         menu.addAction("Link / sync with Rekordbox…",self.rb_panel.sync_local)
         menu.addAction("Export M3U8",self.export_playlist)
@@ -2205,7 +2261,9 @@ class Window(QMainWindow):
         self.entries_table.selectRow(row)
         entry=self.entries_table.item(row,0).data(ROLE)
         menu=QMenu(self)
-        if entry["recording_id"]:menu.addAction("Play / preview",lambda:self.play_row(entry))
+        if entry["recording_id"]:
+            menu.addAction("Play / preview",lambda:self.play_row(entry))
+            menu.addAction('Use a preferred / extended version…',lambda:self.preferred_version(entry))
         if entry["spotify_id"]:
             menu.addAction("Review local match",self.review_match)
             menu.addAction('Not in local library',lambda:self.mark_entry_missing(entry))

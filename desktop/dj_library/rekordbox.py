@@ -215,6 +215,8 @@ class Rekordbox:
             shutil.copy2(self.staged,destination/"master.db")
             xml=previous/"masterPlaylists6.xml"
             if xml.exists():shutil.copy2(xml,destination/xml.name)
+            overlays=previous/'native-files'
+            if overlays.exists():shutil.copytree(overlays,destination/'native-files')
             with database(destination/"master.db") as db:
                 # Some pyrekordbox editing helpers call commit internally. Their
                 # live-process guard applies to the native DB, not this copy.
@@ -225,6 +227,101 @@ class Rekordbox:
             self.state["changes"].append(label)
             self.save()
             return result
+
+    def relocate_files(self,mapping,merge=False,replace_audio=False):
+        """Prepare path/identity changes on the preview, including ANLZ PPTH.
+
+        Duplicate identities with competing analysis are deliberately refused.
+        No source music, analysis file or live database is modified here.
+        """
+        from .catalogue import read_metadata
+        from pyrekordbox.anlz import AnlzFile
+        from sqlalchemy import inspect as sql_inspect
+        from pyrekordbox.db6 import tables
+        key=lambda p:os.path.normcase(os.path.normpath(str(p)))
+        mapping={key(a):Path(b).resolve(strict=True) for a,b in mapping.items() if key(a)!=key(b)}
+        guards=[];analysis_guards={};merged={}
+        def operation(db):
+            table_names=set(sql_inspect(db.engine).get_table_names())
+            def has_analysis(content):
+                return bool(content.AnalysisDataPath or db.query(tables.DjmdCue).filter_by(ContentID=content.ID).first()
+                    or db.query(tables.ContentCue).filter_by(ContentID=content.ID).filter(tables.ContentCue.Cues.is_not(None)).first())
+            contents=list(db.get_content());by_path={}
+            for content in contents:by_path.setdefault(key(content.FolderPath or ''),[]).append(content)
+            targets={}
+            for old,target in mapping.items():
+                for content in by_path.get(old,[]):targets.setdefault(str(target),[]).append(content)
+            for target,selected in targets.items():
+                destination=Path(target)
+                stat=destination.stat();guards.append({'path':target,'size':stat.st_size,'mtime_ns':stat.st_mtime_ns})
+                candidates=list({c.ID:c for c in selected+by_path.get(key(target),[])}.values()) if merge else selected
+                if replace_audio:
+                    existing=by_path.get(key(target),[])
+                    if len(existing)>1:raise ValueError('Resolve duplicate Rekordbox identities for the preferred file first')
+                    metadata=read_metadata(destination)
+                    keeper=existing[0] if existing else db.add_content(destination,Title=metadata['title'],Length=int(metadata['duration']),
+                        ArtistID=name_id(db,tables.DjmdArtist,metadata['artist']),AlbumID=name_id(db,tables.DjmdAlbum,metadata['album']))
+                    candidates=[keeper]+[c for c in candidates if c.ID!=keeper.ID]
+                if not merge and len(candidates)>1:raise ValueError('Multiple Rekordbox identities share a source path. Use duplicate review first.')
+                if not replace_audio:candidates.sort(key=lambda c:not has_analysis(c))
+                keeper=candidates[0]
+                for loser in candidates[1:]:
+                    if db.query(tables.DjmdSongHotCueBanklist).filter_by(ContentID=loser.ID).first():
+                        raise ValueError('A duplicate is used in a Rekordbox hot-cue bank. Resolve that bank entry in Rekordbox before merging this identity.')
+                    if not replace_audio and has_analysis(loser):
+                        raise ValueError('Both copies have Rekordbox analysis or cues. Keep their identities separate and resolve these cues in Rekordbox before merging.')
+                    # Rewrite every declared reference, including UUID-based cue
+                    # metadata, rather than just the visible playlist songs.
+                    for mapper in tables.Base.registry.mappers:
+                        model=mapper.class_
+                        if model is tables.DjmdContent:continue
+                        if mapper.local_table.name not in table_names:continue
+                        for column in mapper.local_table.columns:
+                            for fk in column.foreign_keys:
+                                if fk.column.table.name!='djmdContent':continue
+                                attr=fk.column.name
+                                for row in db.query(model).filter(column==getattr(loser,attr)).all():
+                                    if replace_audio and model in {tables.DjmdCue,tables.ContentCue,tables.ContentActiveCensor,tables.ContentFile}:
+                                        if row not in db.session.deleted:db.delete(row)
+                                    else:setattr(row,column.name,getattr(keeper,attr))
+                    db.flush();db.delete(loser);db.flush();merged[loser.ID]=keeper.ID
+                if len(candidates)>1:
+                    memberships={}
+                    for song in db.query(tables.DjmdSongPlaylist).filter_by(ContentID=keeper.ID).order_by(tables.DjmdSongPlaylist.TrackNo):
+                        memberships.setdefault(song.PlaylistID,[]).append(song)
+                    for playlist_id,songs in memberships.items():
+                        playlist=db.get_playlist(ID=playlist_id)
+                        for duplicate in songs[1:]:db.remove_from_playlist(playlist,duplicate)
+                old_path=keeper.FolderPath
+                # Upstream update_content_path writes ANLZ eagerly. Use isolated
+                # overlays so preview/discard cannot touch live analysis.
+                for value in analysis_paths(self.source,keeper.AnalysisDataPath):
+                    original=Path(value);relative=original.relative_to(self.source.parent)
+                    overlay=db.db_directory/'native-files'/relative
+                    prior=self.staged.parent/'native-files'/relative
+                    overlay.parent.mkdir(parents=True,exist_ok=True)
+                    anlz=AnlzFile.parse_file(prior if prior.exists() else original)
+                    anlz.set_path(target.replace('\\','/'));anlz.save(overlay)
+                    analysis_guards[relative.as_posix()]=file_hash(original)
+                keeper.FolderPath=target.replace('\\','/')
+                if keeper.OrgFolderPath==old_path:keeper.OrgFolderPath=keeper.FolderPath
+                keeper.FileNameL=destination.name;keeper.FileSize=stat.st_size
+                for content_file in db.query(tables.ContentFile).filter_by(ContentID=keeper.ID):
+                    for name in ('Path','rb_local_path'):
+                        if getattr(content_file,name) and key(getattr(content_file,name))==key(old_path):setattr(content_file,name,keeper.FolderPath)
+                    content_file.Size=stat.st_size;content_file.rb_file_hash_dirty=1
+                metadata=read_metadata(destination)
+                keeper.BitRate=metadata['bitrate']//1000;keeper.SampleRate=metadata['sample_rate']
+                # Never carry an Ogg file type over to the new MP3 location.
+                types={'.mp3':'MP3','.flac':'FLAC','.wav':'WAV','.aif':'AIFF','.aiff':'AIFF','.m4a':'M4A'}
+                enum=getattr(tables.FileType,types.get(destination.suffix.lower(),''),None)
+                if enum is not None:keeper.FileType=int(enum)
+            return len(targets)
+        count=self.stage(f'Relink {len(mapping)} music path(s)'+(' and consolidate duplicate identities' if merge else ''),operation)
+        self.state.setdefault('imported_files',[]).extend(guards)
+        self.state.setdefault('analysis_originals',{}).update(analysis_guards)
+        self.state.setdefault('merged_tracks',{}).update(merged)
+        self.save();return count
 
     def playlist(self,db,id_,normal=False):
         row=db.get_playlist(ID=id_)
@@ -339,11 +436,14 @@ class Rekordbox:
         view=self.view()
         if target and not any(p["id"]==target for p in view["playlists"]):target=None
         native_paths={os.path.normcase(os.path.normpath(t["path"])) for t in view["tracks"]}
-        files=self.catalogue.files();paths=[];skipped=[];converted=0
+        files=self.catalogue.files();paths=[];skipped=[];converted=0;preferred_sources={}
         for entry in entries:
+            original_id=entry.get('original_recording_id') or entry['recording_id']
+            if entry['recording_id'] in preferred_sources and original_id!=preferred_sources[entry['recording_id']]:continue
+            if entry['recording_id']:preferred_sources[entry['recording_id']]=original_id
             choices=[row for row in files if row["recording_id"]==entry["recording_id"] and row["available"]
                       and (path:=self.catalogue.resolve(row)) and path.is_file()] if entry["recording_id"] else []
-            choices.sort(key=lambda row:os.path.normcase(os.path.normpath(str(self.catalogue.resolve(row)))) not in native_paths)
+            choices.sort(key=lambda row:(not bool(row.get('preferred')),os.path.normcase(os.path.normpath(str(self.catalogue.resolve(row)))) not in native_paths))
             row=choices[0] if choices else None
             path=self.catalogue.resolve(row) if row else None
             if not path or not path.is_file():skipped.append(entry);continue
@@ -405,7 +505,11 @@ class Rekordbox:
     def add_recordings(self,playlist_id,recording_ids):
         files=self.catalogue.files();paths=[]
         native_paths={os.path.normcase(os.path.normpath(t['path'])) for t in self.view()['tracks']}
+        seen=set()
         for id_ in recording_ids:
+            id_=self.catalogue.effective_recording(id_)
+            if id_ in seen:continue
+            seen.add(id_)
             row=next((r for r in files if r["recording_id"]==id_ and r["available"] and (p:=self.catalogue.resolve(r)) and p.is_file()),None)
             if not row:raise ValueError("Download or match every dragged track before adding to Rekordbox")
             from .compatibility import compatible_path
@@ -581,6 +685,13 @@ class Rekordbox:
             replacements=[(self.staged,self.source)]
             xml=self.staged.parent/"masterPlaylists6.xml"
             if xml.exists():replacements.append((xml,self.source.parent/xml.name))
+            for relative,digest in self.state.get('analysis_originals',{}).items():
+                original=(self.source.parent/relative).resolve()
+                overlay=(self.staged.parent/'native-files'/relative).resolve()
+                if not original.is_relative_to(self.source.parent) or not overlay.is_relative_to(self.staged.parent/'native-files'):
+                    raise ValueError('Invalid analysis path in preview')
+                if file_hash(original)!=digest:raise ValueError('Rekordbox analysis changed since this preview; refresh before applying')
+                replacements.append((overlay,original))
             previous={target:target.read_bytes() if target.exists() else None for _,target in replacements}
             try:
                 for staged,target in replacements:
@@ -604,6 +715,8 @@ class Rekordbox:
                 for local,target in self.state["links"].items():db.execute("UPDATE playlists SET rekordbox_id=? WHERE id=?",(target,local))
             managed=self.catalogue.get_setting("rekordbox_managed_tracks",{})
             managed.update(self.state.get("managed_tracks",{}))
+            for item in managed.values():
+                item['tracks']=[self.state.get('merged_tracks',{}).get(i,i) for i in item.get('tracks',[])]
             self.catalogue.set_setting("rekordbox_managed_tracks",managed)
             self.state["changes"]=[];self.connect()
             return f"Applied Rekordbox changes; {'retained existing backup' if reused else 'new backup'}: {backup.name}"

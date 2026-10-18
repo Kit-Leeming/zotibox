@@ -7,6 +7,7 @@ import uuid
 from mutagen.mp3 import MP3
 from .catalogue import file_hash,atomic_json
 from .downloads import ffmpeg_path
+from .audio_tags import copy_tags
 
 SUPPORTED={'.mp3','.wav','.aiff','.aif','.flac','.m4a'}
 
@@ -20,7 +21,13 @@ def compatible_path(catalogue,path):
     folder=music/'Rekordbox compatible';folder.mkdir(parents=True,exist_ok=True)
     # Source identity makes the copy reusable without changing any existing file.
     target=folder/(path.stem[:130]+' - '+digest[:12]+'.mp3');receipt=target.with_suffix('.mp3.json')
+    unverified=None
     def remember(output_hash):
+        from .audio_tags import repair_missing
+        with catalogue.scan_lock:repaired=repair_missing(catalogue,path,target,output_hash)
+        if repaired!=output_hash:
+            output_hash=repaired;atomic_json(receipt,{'source':digest,'output':output_hash,'conversion':'MP3 320 kbps; lossy source re-encoded'})
+            catalogue.set_setting('audio_source_'+output_hash,'Lossy compatibility copy · MP3 320 kbps')
         stat=target.stat();sources=catalogue.get_setting('compatibility_sources',{})
         sources[os.path.normcase(str(target))]={'source':digest,'output':output_hash,'size':stat.st_size,'mtime_ns':stat.st_mtime_ns}
         catalogue.set_setting('compatibility_sources',sources);return target
@@ -29,17 +36,37 @@ def compatible_path(catalogue,path):
             saved=json.loads(receipt.read_text(encoding='utf-8'))
             if saved['source']==digest and saved['output']==file_hash(target):MP3(target);return remember(saved['output'])
         except (OSError,ValueError,KeyError):pass
-        raise ValueError(f'A compatibility copy already exists but cannot be verified: {target.name}')
+        # Never adopt or overwrite an unverified file. Rebuild from the source
+        # into a separate, receipted name and reuse that on subsequent attempts.
+        unverified=target;conflict=str(target)
+        target=target.with_stem(target.stem+' - verified');receipt=target.with_suffix('.mp3.json')
+        if target.exists():
+            try:
+                saved=json.loads(receipt.read_text(encoding='utf-8'))
+                if saved['source']==digest and saved['output']==file_hash(target):MP3(target);return remember(saved['output'])
+            except (OSError,ValueError,KeyError):pass
+            raise ValueError('Both compatibility copies were modified. Review them in Local Music before retrying; no files were replaced.')
+        conflicts=catalogue.get_setting('compatibility_conflicts',[])
+        if conflict not in conflicts:conflicts.append(conflict);catalogue.set_setting('compatibility_conflicts',conflicts)
     temporary=folder/('.zotibox-'+uuid.uuid4().hex+'.mp3')
     try:
         flags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0
         result=subprocess.run([str(ffmpeg_path('ffmpeg')),'-v','error','-nostdin','-i',str(path),'-map','0:a:0','-vn','-map_metadata','0',
             '-c:a','libmp3lame','-b:a','320k',str(temporary)],capture_output=True,timeout=600,creationflags=flags)
         if result.returncode:raise ValueError('Could not make a Rekordbox-compatible MP3 copy')
+        copy_tags(path,temporary)
         MP3(temporary)
         check=subprocess.run([str(ffmpeg_path('ffmpeg')),'-v','error','-nostdin','-i',str(temporary),'-f','null','-'],capture_output=True,timeout=600,creationflags=flags)
         if check.returncode or file_hash(path)!=digest:raise ValueError('Compatibility copy validation failed; original retained')
-        temporary.rename(target);output_hash=file_hash(target);atomic_json(receipt,{'source':digest,'output':output_hash,'conversion':'MP3 320 kbps; lossy source re-encoded'})
+        # Adopt a copy with a lost receipt only when its audio packets match a
+        # freshly verified encode. Keep user metadata instead of overwriting it.
+        if unverified:
+            from .artwork_repair import audio_hash
+            try:identical=audio_hash(unverified)==audio_hash(temporary)
+            except ValueError:identical=False
+            if identical:target=unverified;receipt=target.with_suffix('.mp3.json')
+        if target!=unverified:temporary.rename(target)
+        output_hash=file_hash(target);atomic_json(receipt,{'source':digest,'output':output_hash,'conversion':'MP3 320 kbps; lossy source re-encoded'})
         catalogue.set_setting('audio_source_'+output_hash,'Lossy compatibility copy · MP3 320 kbps')
         return remember(output_hash)
     finally:temporary.unlink(missing_ok=True)
