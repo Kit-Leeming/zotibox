@@ -37,6 +37,10 @@ def copy_tags(source,target,missing_only=False):
     output=File(target,easy=True)
     if output.tags is None:output.add_tags()
     for key,values in (getattr(source_tags,'tags',None) or {}).items():
+        if hasattr(getattr(source_tags,'tags',None),'getall'):
+            key={'TIT2':'title','TPE1':'artist','TPE2':'albumartist','TALB':'album','TCON':'genre','TDRC':'date','TRCK':'tracknumber','TPOS':'discnumber','TSRC':'isrc','TBPM':'bpm','TCOM':'composer'}.get(key.split(':')[0])
+            if not key:continue
+            values=[str(value) for value in getattr(values,'text',[]) ]
         if missing_only and output.get(key):continue
         try:output[key]=values
         except (KeyError,ValueError,TypeError):pass  # Container-specific tags have no ID3 equivalent.

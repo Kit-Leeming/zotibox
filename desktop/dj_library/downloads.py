@@ -370,7 +370,7 @@ class DownloadEngine:
                     self.catalogue.set_setting("audio_source_"+rows[0]["sha256"],source_description(source_format))
                     self.catalogue.decide_match(track["id"], rows[0]["recording_id"], "download", f"Downloaded exact Spotify ID; source {source_format}")
                     self.catalogue.update_download(job["id"], state="complete", progress=100,
-                        message=f"Complete · {source_description(source_format)}", output=str(destination))
+                        message=f"Complete · {source_description(source_format)}"+(' · genre unavailable' if options.get('MD_SAVE_GENRES',True) and not metadata.get('genre') else ''), output=str(destination))
                     self.cleanup(stage)
                 except InterruptedError:
                     current = next((row for row in self.catalogue.download_jobs() if row["id"] == job["id"]),None)

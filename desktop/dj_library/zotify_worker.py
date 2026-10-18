@@ -6,6 +6,17 @@ import sys
 class OutputFormatUnavailable(ValueError):
     """A fixed, credential-free explanation safe to show in the download queue."""
 
+def install_genre_policy(track_class,zotify,emit):
+    original=track_class.write_audio_tags
+    def write_tags(self,path):
+        if zotify.CONFIG.get_save_genres() and not self.genres:
+            # Upstream aggregates genres only when it fetches uncached artists.
+            self.genres=sorted({genre for artist in self.artists or [] for genre in getattr(artist,'genres',None) or []})
+        result=original(self,path)
+        if zotify.CONFIG.get_save_genres():emit('genre',available=bool(self.genres))
+        return result
+    track_class.write_audio_tags=write_tags
+
 def public_error(exc):
     from .zotify_login import failure_message
     return str(exc) if isinstance(exc,OutputFormatUnavailable) else failure_message(exc)
@@ -154,6 +165,8 @@ def main(arguments):
             import zotify.api
             emit("ready", version=Zotify.VERSION)
             return 0
+        from zotify.api import Track
+        install_genre_policy(Track,Zotify,emit)
         login_errors = []
         class WorkerOAuth(LoopbackOAuth):
             def flow(self):

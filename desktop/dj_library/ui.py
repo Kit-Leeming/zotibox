@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings,
 from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen,QAction,QKeySequence
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
-    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider)
+    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider,QSpinBox)
 from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTabs
 from .playlist_picker import choose_playlist
 from .playlist_tree import PlaylistTree,PlaylistItem
@@ -657,6 +657,9 @@ class Window(QMainWindow):
         self.rb_panel=RekordboxPanel(self)
         self.playlist_tabs.addTab(self.rb_panel,"Rekordbox")
         self.playlist_tabs.currentChanged.connect(self.rb_panel.ensure_loaded)
+        from .all_tracks import AllTracks
+        self.all_tracks=AllTracks(self);self.playlist_tabs.addTab(self.all_tracks,'All Tracks')
+        self.playlist_tabs.currentChanged.connect(lambda index:self.all_tracks.activate() if index==2 else None)
 
     def build_settings(self):
         layout=self.page()
@@ -826,6 +829,12 @@ class Window(QMainWindow):
         self.rb_write.toggled.connect(self.enable_rb_write)
         form.addWidget(self.rb_write)
         form.addWidget(muted("Apply reuses its verified backup while Rekordbox matches the last ZotiBox apply. External changes require a new backup. Restore always creates one. Music files are not included."))
+        retention=QHBoxLayout();retention.addWidget(QLabel('Rekordbox backups to keep'))
+        self.backup_limit=QSpinBox();self.backup_limit.setRange(0,1000);self.backup_limit.setSpecialValueText('Keep all')
+        self.backup_limit.setValue(self.catalogue.get_setting('rekordbox_backup_limit',4))
+        self.backup_limit.valueChanged.connect(lambda value:self.catalogue.set_setting('rekordbox_backup_limit',value))
+        retention.addWidget(self.backup_limit);retention.addStretch();form.addLayout(retention)
+        form.addWidget(muted('Older ZotiBox backups are removed after a new backup has been verified. Default: 4.'))
         bar=QHBoxLayout()
         bar.addWidget(self.button("Back up now",self.backup_rb,"SP_DialogSaveButton"))
         bar.addWidget(self.button("Open backups folder",lambda:self.explorer(self.rb_panel.backend.root/"backups",False),"SP_DirOpenIcon"))
@@ -936,6 +945,7 @@ class Window(QMainWindow):
 
     def refresh_rb_backups(self):
         self.rb_backups.clear()
+        self.rb_backups.setToolTip(getattr(self.rb_panel.backend,'retention_warning',''))
         for path in self.rb_panel.backend.backups():
             item=QListWidgetItem(f"{path.name} · {path.stat().st_size/1048576:.1f} MB")
             item.setData(ROLE,str(path));item.setIcon(self.icon("SP_DialogSaveButton"));self.rb_backups.addItem(item)
@@ -1010,6 +1020,7 @@ class Window(QMainWindow):
             db.execute("UPDATE downloads SET state='paused',message='Interrupted session; resume to retry' WHERE state='running'")
 
     def refresh(self):
+        with QSignalBlocker(self.backup_limit):self.backup_limit.setValue(self.catalogue.get_setting('rekordbox_backup_limit',4))
         self.rb_path.setText(str(self.rb_panel.backend.source))
         self.rb_write.blockSignals(True);self.rb_write.setChecked(self.catalogue.get_setting("rekordbox_write_enabled",False));self.rb_write.blockSignals(False)
         self.workspace_label.setText(str(self.catalogue.workspace))
@@ -1017,6 +1028,7 @@ class Window(QMainWindow):
         self.refresh_files()
         self.refresh_playlists()
         self.refresh_downloads()
+        if self.playlist_tabs.currentIndex()==2:self.all_tracks.refresh()
         self.roots_list.clear()
         for root in self.catalogue.roots():
             item=QListWidgetItem(f"{root['name']}\n{root['path'] or 'Not mapped on this PC'}")
@@ -1116,7 +1128,7 @@ class Window(QMainWindow):
 
     def fill_table(self,table,rows,values):
         self._thumb_bindings=self.catalogue.bindings()
-        self._thumbnail_files={f["recording_id"]:f for f in self.catalogue.files() if f["available"]}
+        self._thumbnail_files={f["recording_id"]:f for f in reversed(self.catalogue.files()) if f["available"]}
         block=QSignalBlocker(table)
         table.setRowCount(len(rows))
         for index,row in enumerate(rows):
@@ -1215,6 +1227,7 @@ class Window(QMainWindow):
         self.refresh_downloads()
         self.refresh_files()
         self.refresh_playlists()
+        if self.playlist_tabs.currentIndex()==2:self.all_tracks.refresh()
 
     def update_download_controls(self):
         if not hasattr(self,"download_buttons"):return
@@ -1997,6 +2010,8 @@ class Window(QMainWindow):
     def switch_workspace(self,path):
         if Path(path).resolve()==self.catalogue.workspace:
             return
+        if getattr(self,'organise_window',None):
+            self.organise_window.close();self.organise_window.deleteLater();self.organise_window=None
         lock=self.lock_workspace(path)
         try:
             catalogue=Catalogue(path)
@@ -2049,7 +2064,7 @@ class Window(QMainWindow):
         quality=" · ".join([row["codec"]]+([f"{row['sample_rate']} Hz"] if row["sample_rate"] else [])+
             ([f"{row['bits']} bit"] if row["bits"] else [])+([f"{row['bitrate']//1000} kbps"] if row["bitrate"] else []))
         text="\n".join([f"Title: {row['title']}",f"Artist: {row['artist']}",f"Album: {row['album']}",f"Path: {self.catalogue.resolve(row) or 'Not mapped'}",
-            f"Format: {quality}",f"Source: {self.catalogue.get_setting('audio_source_'+row['sha256'],'Unknown — a FLAC extension does not prove a lossless source')}",f"Size: {row['size']/1024**2:.2f} MB",f"Duration: {duration(row['duration'])}",
+            f"Genre: {row.get('genre') or 'Not tagged'}",f"Format: {quality}",f"Source: {self.catalogue.get_setting('audio_source_'+row['sha256'],'Unknown — a FLAC extension does not prove a lossless source')}",f"Size: {row['size']/1024**2:.2f} MB",f"Duration: {duration(row['duration'])}",
             f"Created: {date_ns(row['created_ns'])}",f"Modified: {date_ns(row['mtime_ns'])}",f"First indexed: {row['indexed_at']}",f"ISRC: {row['isrc'] or 'Not tagged'}",f"SHA-256: {row['sha256']}"])
         box=QMessageBox(self)
         box.setWindowTitle("File details")
@@ -2091,7 +2106,10 @@ class Window(QMainWindow):
 
     def organise_library(self,tab=0):
         from .organisation_ui import OrganiseDialog
-        OrganiseDialog(self,int(tab)).exec()
+        dialog=getattr(self,'organise_window',None)
+        if dialog is None:
+            dialog=self.organise_window=OrganiseDialog(self,int(tab));dialog.setModal(False)
+        dialog.tabs.setCurrentIndex(int(tab));dialog.show();dialog.raise_();dialog.activateWindow()
 
     def preferred_version(self,row):
         from .organisation_ui import VersionDialog

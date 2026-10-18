@@ -126,6 +126,7 @@ class RekordboxPanel(QWidget):
     def loaded(self,data):
         self.preview_loaded=True
         self.data=data;self.refresh_tree()
+        if hasattr(self.owner,'all_tracks') and self.owner.playlist_tabs.currentIndex()==2:self.owner.all_tracks.refresh()
         self.owner.status.setText("Rekordbox preview updated; live library is unchanged")
 
     def connect(self):

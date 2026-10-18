@@ -134,6 +134,8 @@ class Catalogue:
             if 'bpm' not in {row['name'] for row in db.execute('PRAGMA table_info(files)')}:
                 db.execute('ALTER TABLE files ADD COLUMN bpm REAL NOT NULL DEFAULT 0')
                 db.execute('UPDATE files SET bpm=-1')
+            if 'genre' not in {row['name'] for row in db.execute('PRAGMA table_info(files)')}:
+                db.execute('ALTER TABLE files ADD COLUMN genre TEXT')
         if not self.get_setting('audio_preferences_v2',False):
             options=self.get_setting('zotify_options',{})
             old=options.get('DOWNLOAD_FORMAT','flac')
@@ -260,10 +262,12 @@ class Catalogue:
                                 with self.connect() as db:
                                     old=db.execute('SELECT * FROM files WHERE root_id=? AND relative_path=?',(root['id'],relative)).fetchone()
                             if old and old["size"] == stat.st_size and old["mtime_ns"] == stat.st_mtime_ns:
-                                bpm=read_metadata(path)['bpm'] if old['bpm']<0 else old['bpm']
-                                if not old['available'] or bpm!=old['bpm']:
+                                metadata=read_metadata(path) if old['bpm']<0 or old['genre'] is None else None
+                                bpm=metadata['bpm'] if old['bpm']<0 else old['bpm']
+                                genre=metadata['genre'] if old['genre'] is None else old['genre']
+                                if not old['available'] or bpm!=old['bpm'] or genre!=old['genre']:
                                     with self.connect() as db:
-                                        db.execute("UPDATE files SET available=1,bpm=? WHERE id=?", (bpm,old["id"]))
+                                        db.execute("UPDATE files SET available=1,bpm=?,genre=? WHERE id=?", (bpm,genre,old["id"]))
                                     self.file_revision+=1
                                 result["unchanged"] += 1
                             else:
@@ -289,7 +293,7 @@ class Catalogue:
                                                (file_id, recording_id, root["id"], relative, digest, stat.st_size, stat.st_mtime_ns,
                                                 metadata["codec"], metadata["bitrate"], metadata["sample_rate"], metadata["bits"],
                                                 getattr(stat, "st_birthtime_ns", int(stat.st_ctime * 1e9)), old["indexed_at"] if old else now()))
-                                    db.execute('UPDATE files SET bpm=? WHERE id=?',(metadata['bpm'],file_id))
+                                    db.execute('UPDATE files SET bpm=?,genre=? WHERE id=?',(metadata['bpm'],metadata['genre'],file_id))
                                     self.change(db, "file", file_id, "index")
                                 result["indexed"] += 1
                                 self.file_revision+=1
@@ -697,7 +701,7 @@ def read_metadata(path):
         raise ValueError("Unsupported or unreadable audio file")
     tags = audio.tags or {}
     def tag(key, default=""):
-        id3_key = {"title": "TIT2", "artist": "TPE1", "album": "TALB", "isrc": "TSRC",'bpm':'TBPM'}.get(key)
+        id3_key = {"title": "TIT2", "artist": "TPE1", "album": "TALB", "isrc": "TSRC",'bpm':'TBPM','genre':'TCON'}.get(key)
         value = tags.get(key) or (tags.get(id3_key) if id3_key else None) or [default]
         if hasattr(value, "text"):
             value = value.text
@@ -708,6 +712,6 @@ def read_metadata(path):
         if not 0<bpm<1000:bpm=0
     except (ValueError,TypeError):bpm=0
     return {"title": tag("title", path.stem), "artist": tag("artist"), "album": tag("album"),
-            "isrc": tag("isrc"), "duration": float(getattr(info, "length", 0)), 'bpm':bpm,
+            "isrc": tag("isrc"), "duration": float(getattr(info, "length", 0)), 'bpm':bpm,'genre':tag('genre'),
             "codec": str(getattr(info, "codec_description", "") or path.suffix.lstrip(".").upper()), "bitrate": int(getattr(info, "bitrate", 0) or 0),
             "sample_rate": int(getattr(info, "sample_rate", 0) or 0), "bits": int(getattr(info, "bits_per_sample", 0) or 0)}

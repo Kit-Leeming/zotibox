@@ -28,7 +28,7 @@ class OrganiseDialog(QDialog):
         page=QWidget();box=QVBoxLayout(page);self.tabs.addTab(page,'Copy / move')
         explanation=QLabel('Preview paths, copy and verify, then apply Rekordbox changes. Remove originals only after checking the result.');explanation.setWordWrap(True);box.addWidget(explanation)
         row=QHBoxLayout();box.addLayout(row);self.action=QComboBox()
-        for title,key in [('Consolidate all scanned music','consolidate'),('Move download folder to another drive','move'),('Convert old Ogg / unsupported files to MP3 320','convert')]:self.action.addItem(title,key)
+        for title,key in [('Consolidate all scanned music','consolidate'),('Move download folder to another drive','move'),('Convert old Ogg / unsupported files to MP3 320','convert'),('Convert WAV to lossless FLAC','flac')]:self.action.addItem(title,key)
         row.addWidget(self.action);self.destination=QLineEdit(self.c.get_setting('download_folder',str(self.c.workspace/'Music')));row.addWidget(self.destination,1)
         button('Browse…',self.browse,row);button('Prepare preview',self.prepare,row)
         self.preview=QTableWidget(0,3);self.preview.setHorizontalHeaderLabels(['Original file','Destination','Size'])
@@ -52,7 +52,13 @@ class OrganiseDialog(QDialog):
         page=QWidget();box=QVBoxLayout(page);self.tabs.addTab(page,'Artwork')
         label=QLabel('Fill missing MP3 / FLAC covers from a saved Spotify match or an exact ISRC + album match in MusicBrainz / Cover Art Archive. Existing covers are preserved. Original tags are backed up; audio packets are verified unchanged.');label.setWordWrap(True);box.addWidget(label)
         button('Find and embed missing covers in selected local files',lambda:self.artwork(True),box)
-        button('Find and embed missing covers in entire library',lambda:self.artwork(False),box);box.addStretch()
+        self.art_search=QLineEdit();self.art_search.setPlaceholderText('Filter title, artist or filename');box.addWidget(self.art_search)
+        self.art_files=QTreeWidget();self.art_files.setHeaderLabels(['Track','Artist','Format','File']);box.addWidget(self.art_files,1)
+        self.art_search.textChanged.connect(self.filter_artwork)
+        row=QHBoxLayout();box.addLayout(row)
+        button('Use Local Music selection',self.use_local_selection,row);button('Check visible',lambda:self.check_artwork(True),row);button('Clear checks',lambda:self.check_artwork(False),row)
+        button('Find and embed missing covers in entire library',lambda:self.artwork(False),box)
+        button('Retry unavailable artwork lookups',self.retry_artwork,box)
         self.message=QLabel('');self.message.setWordWrap(True);layout.addWidget(self.message)
         button('Close',self.close,layout);self.refresh();self.tabs.setCurrentIndex(tab)
 
@@ -69,6 +75,9 @@ class OrganiseDialog(QDialog):
         except Exception as exc:self.owner.show_error(exc)
 
     def refresh(self):
+        if self.plan_data:
+            try:self.plan_data=json.loads((self.service.journals/(self.plan_data['id']+'.json')).read_text(encoding='utf-8'))
+            except (OSError,ValueError):pass
         self.execute_button.setEnabled(bool(self.plan_data and self.plan_data['state']=='planned'))
         self.cleanup_button.setEnabled(bool(self.plan_data and self.plan_data['state']=='ready-for-cleanup'))
         selected=self.history.currentData();self.history.clear()
@@ -96,6 +105,29 @@ class OrganiseDialog(QDialog):
             seen.add(row['recording_id']);preferred=self.c.effective_recording(row['recording_id'])
             item=QListWidgetItem(f"{row['artist']} — {row['title']}"+(' · preferred version set' if preferred!=row['recording_id'] else ''))
             item.setData(ROLE,row);self.versions.addItem(item)
+        self.refresh_artwork()
+
+    def refresh_artwork(self,selected=None):
+        ids=selected if selected is not None else {self.art_files.topLevelItem(i).data(0,ROLE)['id'] for i in range(self.art_files.topLevelItemCount()) if self.art_files.topLevelItem(i).checkState(0)==Qt.CheckState.Checked}
+        if selected is None and not self.art_files.topLevelItemCount():ids={r['id'] for r in self.owner.selected_files()}
+        self.art_files.clear()
+        for row in self.c.files():
+            if not row['available'] or Path(row['relative_path']).suffix.lower() not in {'.mp3','.flac'}:continue
+            item=QTreeWidgetItem([row['title'],row['artist'],row['codec'],row['relative_path']]);item.setData(0,ROLE,row)
+            item.setCheckState(0,Qt.CheckState.Checked if row['id'] in ids else Qt.CheckState.Unchecked);self.art_files.addTopLevelItem(item)
+        self.filter_artwork()
+
+    def use_local_selection(self):self.refresh_artwork({r['id'] for r in self.owner.selected_files()})
+
+    def filter_artwork(self):
+        needle=self.art_search.text().casefold()
+        for i in range(self.art_files.topLevelItemCount()):
+            item=self.art_files.topLevelItem(i);item.setHidden(needle not in ' '.join(item.text(c) for c in range(4)).casefold())
+
+    def check_artwork(self,checked):
+        for i in range(self.art_files.topLevelItemCount()):
+            item=self.art_files.topLevelItem(i)
+            if not checked or not item.isHidden():item.setCheckState(0,Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
 
     def browse(self):
         value=QFileDialog.getExistingDirectory(self,'Destination folder')
@@ -104,12 +136,13 @@ class OrganiseDialog(QDialog):
     def prepare(self):
         kind=self.action.currentData();files=None
         if kind=='convert':files=[f for f in self.c.files() if f['available'] and Path(f['relative_path']).suffix.lower() in {'.ogg','.oga','.opus','.aac','.wma','.alac','.mp4'}]
+        if kind=='flac':files=[f for f in self.c.files() if f['available'] and Path(f['relative_path']).suffix.lower()=='.wav']
         self.run('Preparing file organisation',lambda progress,cancel:self.service.plan(kind,self.destination.text(),files),self.display_plan)
 
     def display_plan(self,plan):
         self.plan_data=plan;self.tabs.setCurrentIndex(0);self.preview.setRowCount(len(plan['rows']))
         for i,row in enumerate(plan['rows']):
-            for j,value in enumerate((row['source'],row['target'] or 'Verified MP3 in download folder',f"{row['size']/1024/1024:.1f} MB")):
+            for j,value in enumerate((row['source'],row['target'] or ('Verified FLAC beside original WAV' if plan['kind']=='flac' else 'Verified MP3 in download folder'),f"{row['size']/1024/1024:.1f} MB")):
                 item=QTableWidgetItem(value);item.setToolTip(value);self.preview.setItem(i,j,item)
         total=sum(r['size'] for r in plan['rows'])/1024**3
         self.message.setText(f"{len(plan['rows'])} files · {total:.2f} GB of originals · {plan['state']}. Originals remain until you explicitly remove them.")
@@ -157,12 +190,15 @@ class OrganiseDialog(QDialog):
 
     def artwork(self,selected):
         from .artwork_repair import repair
-        rows=self.owner.selected_files() if selected else [f for f in self.c.files() if f['available']]
-        if not rows:self.message.setText('Select files in Local Music first.');return
+        rows=[self.art_files.topLevelItem(i).data(0,ROLE) for i in range(self.art_files.topLevelItemCount()) if self.art_files.topLevelItem(i).checkState(0)==Qt.CheckState.Checked] if selected else [f for f in self.c.files() if f['available']]
+        if not rows:self.message.setText('Check tracks in the list below, or use the current Local Music selection.');return
         def done(result):
             self.owner.artwork.images.clear()
-            self.message.setText(f"Artwork added: {result['embedded']} · unchanged / no exact cover: {result['skipped']}"+('\n'+'\n'.join(result['errors'][:8]) if result['errors'] else ''))
-        self.run('Finding missing artwork',lambda progress,cancel:repair(self.c,rows,self.owner.spotify,progress,cancel),done)
+            self.message.setText(f"Artwork added: {result['embedded']} · already has cover: {result['existing']} · no exact cover: {result['not_found']} · unsupported: {result['unsupported']} · retry later: {result['deferred']}"+('\n'+'\n'.join(result['errors'][:8]) if result['errors'] else ''))
+        self.run('Finding missing artwork',lambda progress,cancel:repair(self.c,rows,self.owner.spotify,progress,cancel,rekordbox=self.service.rekordbox),done)
+
+    def retry_artwork(self):
+        self.refresh_artwork(set(self.c.get_setting('artwork_retry_files',[])));self.artwork(True)
 
     def closeEvent(self,event):
         if self.owner.job:self.message.setText('Wait for the operation to finish, or use Cancel task in the main window.');event.ignore()

@@ -37,7 +37,7 @@ class Organiser:
             if kind=='move' and not source.is_relative_to(music):continue
             if kind in {'duplicates','version'}:target=Path(keeper).resolve(strict=True)
             elif kind=='move':target=destination/source.relative_to(music)
-            elif kind=='convert':target=None
+            elif kind in {'convert','flac'}:target=None
             else:
                 if f['sha256'] in by_hash:target=by_hash[f['sha256']]
                 else:
@@ -111,7 +111,10 @@ class Organiser:
                 for index,row in enumerate(plan['rows']):
                     if cancel.is_set():raise InterruptedError('Organisation paused; originals retained')
                     source=Path(row['source'])
-                    if plan['kind']=='convert':
+                    if plan['kind']=='flac':
+                        from .lossless import wav_to_flac
+                        target=wav_to_flac(source);row['target']=str(target)
+                    elif plan['kind']=='convert':
                         from .compatibility import compatible_path
                         target=compatible_path(c,source);row['target']=str(target)
                     elif plan['kind']=='version':
@@ -166,9 +169,9 @@ class Organiser:
                         target_id=existing['id'] if existing else uid()
                         if not existing:
                             columns=list(prior.keys());values=dict(prior);values.update(id=target_id,root_id=root_id,relative_path=relative,sha256=row['target_sha256'],size=stat.st_size,mtime_ns=stat.st_mtime_ns,available=1,codec=target.suffix[1:].upper())
-                            if plan['kind']=='convert':
+                            if plan['kind'] in {'convert','flac'}:
                                 metadata=read_metadata(target)
-                                for key in ('codec','bitrate','sample_rate','bits','bpm'):values[key]=metadata[key]
+                                for key in ('codec','bitrate','sample_rate','bits','bpm','genre'):values[key]=metadata[key]
                             db.execute('INSERT INTO files ('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')',[values[k] for k in columns])
                         db.execute('UPDATE recordings SET preferred_file_id=? WHERE id=?',(target_id,recording))
                         db.execute('UPDATE downloads SET output=? WHERE output=?',(str(target),row['source']))

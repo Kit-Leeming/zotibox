@@ -68,5 +68,8 @@ for i,row in enumerate(plan['rows']):
 dialog.show()
 for _ in range(20):app.processEvents();time.sleep(.01)
 dialog.grab().save(str(output/'organisation.png'));dialog.close()
+window.rb_panel.preview_loaded=True
+window.navigation.setCurrentRow(3);window.playlist_tabs.setCurrentIndex(2);window.all_tracks.unassigned.setChecked(True)
+capture('all-tracks.png',3)
 window.download_job=None;window.close()
 print('Captured demo screenshots in docs/images')

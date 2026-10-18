@@ -467,8 +467,9 @@ class Rekordbox:
                 content=candidates[0] if candidates else None
                 if not content:
                     content=db.add_content(path,Title=row["title"],Length=int(row["duration"]),ISRC=row.get('isrc') or None,BPM=round(max(0,row.get('bpm',0))*100) or None,
-                        ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
+                        ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]),GenreID=name_id(db,tables.DjmdGenre,row.get('genre') or ''))
                     existing[os.path.normcase(os.path.normpath(str(path)))]=[content]
+                if not content.GenreID and row.get('genre'):content.GenreID=name_id(db,tables.DjmdGenre,row['genre'])
                 desired.append(content)
             managed.extend(content.ID for content in desired)
             old={}
@@ -526,13 +527,34 @@ class Rekordbox:
                 key=os.path.normcase(os.path.normpath(str(path)));matches=existing.get(key,[])
                 if len(matches)>1:raise ValueError("Multiple Rekordbox identities share this file; resolve that ambiguity first")
                 content=matches[0] if matches else db.add_content(path,Title=row["title"],Length=int(row["duration"]),ISRC=row.get('isrc') or None,BPM=round(max(0,row.get('bpm',0))*100) or None,ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
+                if not content.GenreID and row.get('genre'):content.GenreID=name_id(db,tables.DjmdGenre,row['genre'])
                 existing[key]=[content];db.add_to_playlist(playlist,content)
         result=self.stage(f"Add {len(paths)} local track(s) to Rekordbox playlist",operation)
         self.state.setdefault("imported_files",[]).extend({"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths)
         self.save();return result
 
     def backups(self):
-        return sorted((self.root/"backups").glob("*.zip"),reverse=True)
+        return sorted((self.root/"backups").glob("*.zip"),key=lambda p:(p.stat().st_mtime_ns,p.name),reverse=True)
+
+    def prune_backups(self,newest):
+        limit=int(self.catalogue.get_setting('rekordbox_backup_limit',4))
+        if limit<=0:return
+        folder=(self.root/'backups').resolve();owned=[]
+        for path in self.backups():
+            if path.is_symlink() or path.resolve().parent!=folder:continue
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    if json.loads(archive.read('manifest.json')).get('format')=='zotibox-rekordbox-backup-1':owned.append(path)
+            except (OSError,ValueError,KeyError,zipfile.BadZipFile):continue
+        keep={newest}
+        for path in owned:
+            if len(keep)<limit:keep.add(path)
+        errors=[]
+        for path in owned:
+            if path not in keep:
+                try:path.unlink()
+                except OSError:errors.append(path.name)
+        self.retention_warning='Could not remove: '+', '.join(errors) if errors else ''
 
     def native_files(self,cancel=None):
         """Content hashes also detect changes to analysis/cues outside master.db."""
@@ -591,6 +613,8 @@ class Rekordbox:
                                 if cancel and cancel.is_set():raise InterruptedError("Backup verification cancelled")
                                 check.update(block)
                         if check.hexdigest()!=digest:raise ValueError("Backup checksum verification failed")
+                try:self.prune_backups(archive)
+                except Exception:self.retention_warning='The new backup is verified, but older backups could not be removed.'
                 return archive
             except Exception:
                 archive.unlink(missing_ok=True);raise

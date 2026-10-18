@@ -71,6 +71,10 @@ For Spotify on your phone, right-click a linked playlist → **Export local extr
 
 ## Backups and current limits
 
+Rekordbox backup retention is configurable in Settings → Rekordbox and defaults to the four most recent verified backups. Set it to **Keep all** to disable automatic retention cleanup. File-tag backups are separate.
+
+**Playlists → All Tracks** lists local recordings, with an option to show music outside playlists and sort by added/downloaded date.
+
 ![Reviewed local file organisation](docs/images/organisation.png)
 
 - Rekordbox can stay open for viewing and preparing previews. Close it before Backup, Apply or Restore. Database writes are disabled initially. Apply reuses its verified backup while the native library matches the last successful ZotiBox apply; external changes or a missing backup require a new one. Restore always makes a recovery backup. A visible warning indicates when Rekordbox is running. External music files are not included in those backups.

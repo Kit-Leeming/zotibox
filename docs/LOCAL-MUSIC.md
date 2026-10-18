@@ -2,6 +2,8 @@
 
 Open **Local Music → Organise**. Pause downloads and finish scanning before changing files.
 
+The Organise window stays open while you use the main app. The Artwork tab has its own searchable checklist and can also copy your selection from Local Music.
+
 ## Consolidate or move
 
 1. Choose **Consolidate all scanned music** to copy into the configured download folder, or **Move download folder** to copy the existing folder to a separate destination. Windows folder moves use Robocopy and include covers, lyrics and other sidecars.
@@ -27,8 +29,18 @@ To replace the regular recording throughout the existing native collection, enab
 
 ## Older Ogg files and artwork
 
+**Convert WAV to lossless FLAC** preserves integer PCM WAV audio up to 24 bits, checks identical decoded PCM, and copies tags and embedded covers. Float or higher-precision WAV is retained instead of silently reducing precision. FLAC thumbnails appear in the library; missing covers can then be filled through Artwork. Relinks and original-file cleanup use the same review process as other organisation operations.
+
 Choose **Convert old Ogg / unsupported files to MP3 320** in Organise. Metadata and embedded artwork are copied. After applying native relinks, remove verified originals through the saved operation. Re-encoding lossy audio does not improve its source quality.
 
 An unverified compatibility copy means its saved receipt is missing or no longer matches. ZotiBox compares it with a fresh verified conversion: matching audio can be adopted without overwriting metadata; otherwise a separately named verified copy is used and the unverified file is retained for review.
 
 **Artwork** fills missing MP3/FLAC covers from conversion originals, saved Spotify identities, or exact ISRC/album matches using [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API) and the [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive/API). Existing covers stay intact. Original files are backed up under `.local/tag-backups`, and compressed audio packets must remain unchanged. Uncertain or unavailable artwork is skipped.
+
+Temporary service errors are retried with backoff, then counted separately as **retry later**. Use **Retry unavailable artwork lookups** after the service recovers. Existing covers, unsupported formats and missing exact matches have separate counts. Verified artwork edits update pending relink checksums so they do not prevent Apply or cleanup.
+
+## All Tracks and genres
+
+Open **Playlists → All Tracks** for a virtual playlist of available local recordings. Enable **Not in any playlist** to find unassigned music. Membership includes local and Spotify-linked playlists plus the loaded Rekordbox preview. Refresh Rekordbox memberships when needed. Click **Added / downloaded** to sort by actual completed download time, falling back to file creation time for other local music. Right-click to add selected tracks to a playlist, or drag them to another playlist.
+
+Genres are read from file tags and carried into new Rekordbox entries or entries with no native genre; existing native genres are retained. Rescan once to index genre tags in older files. Zotify’s genre setting uses Spotify artist metadata, which may be absent and does not classify individual songs. Enable **MD_ALLGENRES** to retain all available labels instead of the first one.

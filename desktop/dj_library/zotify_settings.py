@@ -26,6 +26,8 @@ INTERNAL={
     'STANDARD_INTERFACE':'The worker uses structured progress events for the download queue.',
     'PRINT_SPLASH':'Terminal splash output is omitted in the desktop app.'}
 HELP={
+    'MD_SAVE_GENRES':'Save artist genres supplied by Spotify. These are artist-level labels, not a classification of each song. If the source supplies none, the genre stays blank and the queue reports it.',
+    'MD_ALLGENRES':'Write all available artist genres rather than only the first. Existing file and Rekordbox genres are preserved during enrichment.',
     'DOWNLOAD_FORMAT':'Auto: genuine FLAC if available, otherwise MP3 320 kbps. MP3: always encode 320 kbps. FLAC: requires a lossless source. Original: preserve the selected source codec.',
     'DOWNLOAD_QUALITY':'Preferred source, independent of output. Lossless where available falls back to the best lossy representation. Explicit FLAC output always requires lossless.',
     'DOWNLOAD_RATE_LIMITER':'Audio-duration multiplier: 1 adds real-time pacing; 0 adds no delay. Downloads remain sequential.',
