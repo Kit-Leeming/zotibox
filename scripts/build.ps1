@@ -6,8 +6,9 @@ if (-not (Test-Path -LiteralPath $compilerPath)) {
     $installedCompiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if ($installedCompiler) { $compilerPath = $installedCompiler.Source }
 }
+$taskGitDirectory = Split-Path -Parent (Get-Command git -ErrorAction Stop).Source
 $taskOriginalPath = $env:PATH
-$env:PATH = "$projectPath\.venv\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
+$env:PATH = "$projectPath\.venv\Scripts;$taskGitDirectory;$env:SystemRoot\System32;$env:SystemRoot"
 if (-not (Test-Path -LiteralPath $pythonPath)) { throw 'Install project dependencies into .venv first. See README.md.' }
 Push-Location $projectPath
 try {
