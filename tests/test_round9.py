@@ -83,7 +83,7 @@ def test_global_queue_stays_on_page_hides_after_queuing_and_skips_unavailable(tm
 def test_sidebar_remembers_collapse_and_keeps_headings_and_tooltips(tmp_path):
     app();window=Window(tmp_path/'db');window.toggle_sidebar();window.navigation.setCurrentRow(2)
     assert window.heading.text()=='Local Music' and window.navigation.item(2).text()==''
-    assert window.navigation.item(2).toolTip()=='Local Music' and window.sidebar.width()==68
+    assert window.navigation.item(2).toolTip()=='Local Music (Ctrl+3)' and window.sidebar.width()==68
     window.close();window=Window(tmp_path/'db');assert window.sidebar.width()==68;window.close()
 
 

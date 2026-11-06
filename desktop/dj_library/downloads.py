@@ -233,7 +233,7 @@ class DownloadEngine:
             elif kind == "error":
                 errors.append(message.get("message", "Zotify failed"))
                 atomic_json(self.catalogue.workspace/'.local'/'last-worker-error.json',message.get('diagnostic',{}))
-            self.event("refresh", "")
+            self.event("refresh", kind)
         exit_code = self.process.wait()
         timer.cancel()
         with self.process_lock:

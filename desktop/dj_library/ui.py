@@ -208,6 +208,7 @@ class Window(QMainWindow):
         self.set_row_height(self.catalogue.get_setting("row_height",40))
         self.set_sidebar_collapsed(self.catalogue.get_setting('sidebar_collapsed',False))
         self.navigation.setCurrentRow(0)
+        self.setup_shortcuts()
         if defer_startup:self.status.setText("Loading library…");QTimer.singleShot(50,self.initial_load)
         else:self.refresh()
 
@@ -220,6 +221,29 @@ class Window(QMainWindow):
         self.catalogue.set_setting('sidebar_collapsed',bool(collapsed))
 
     def toggle_sidebar(self):self.set_sidebar_collapsed(not self.catalogue.get_setting('sidebar_collapsed',False))
+
+    def setup_shortcuts(self):
+        def shortcut(parent,key,callback,context=Qt.ShortcutContext.WindowShortcut):
+            action=QAction(parent);action.setShortcut(QKeySequence(key));action.setShortcutContext(context)
+            action.triggered.connect(callback);parent.addAction(action)
+        shortcut(self,'Ctrl+F',self.focus_search)
+        for index in range(5):
+            shortcut(self,f'Ctrl+{index+1}',lambda checked=False,i=index:self.navigation.setCurrentRow(i))
+            self.navigation.item(index).setToolTip(f'{self.navigation_names[index]} (Ctrl+{index+1})')
+        for key,fn in [('Alt+Up',lambda:self.move_entry(-1)),('Alt+Down',lambda:self.move_entry(1)),('Delete',self.remove_entry)]:
+            def local_action(checked=False,callback=fn):
+                playlist=next((p for p in self.catalogue.playlists() if p['id']==self.playlist_id),None)
+                if playlist and playlist['source']=='manual':callback()
+            shortcut(self.entries_table,key,local_action,Qt.ShortcutContext.WidgetShortcut)
+        self.up_button.setToolTip('Move selected entry up (Alt+Up)');self.down_button.setToolTip('Move selected entry down (Alt+Down)')
+        self.remove_entry_button.setToolTip('Remove selected entries from this playlist (Delete). Music stays on disk.')
+
+    def focus_search(self):
+        page=self.navigation.currentRow()
+        target=self.dashboard_search if page==0 else self.download_search if page==1 else self.search if page==2 else None
+        if page==3:
+            target=self.rb_panel.search if self.playlist_tabs.currentIndex()==1 else self.playlist_name_search if self.playlist_tabs.currentIndex()==0 else self.all_tracks.search
+        if target is not None:target.setFocus();target.selectAll()
 
     def play_row(self,row):
         try:
@@ -317,6 +341,8 @@ class Window(QMainWindow):
 
     def button(self,text,callback,icon=None,primary=False):
         result=QPushButton(text)
+        result.setAccessibleName(text.rstrip('…'))
+        result.setMinimumHeight(34)
         result.setProperty("primary",primary)
         if icon:
             result.setProperty("icon_name",icon)
@@ -328,6 +354,7 @@ class Window(QMainWindow):
         result=QLineEdit()
         result.setPlaceholderText(placeholder)
         result.setClearButtonEnabled(True)
+        result.setAccessibleName(placeholder)
         return result
 
     def page(self):
@@ -412,6 +439,10 @@ class Window(QMainWindow):
     def table(self,columns):
         table=TrackTable(0,len(columns))
         table.setHorizontalHeaderLabels(columns)
+        table.column_settings_key='table_columns:'+'|'.join(columns)
+        hidden=self.catalogue.get_setting(table.column_settings_key,[])
+        for column in hidden:
+            if isinstance(column,int) and 0<column<len(columns):table.setColumnHidden(column,True)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -425,8 +456,29 @@ class Window(QMainWindow):
         table.setAlternatingRowColors(True)
         table.setItemDelegate(RowDelegate(table,lambda:self.theme))
         table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.horizontalHeader().setToolTip('Right-click a heading to choose visible columns')
+        table.horizontalHeader().customContextMenuRequested.connect(lambda point:self.column_menu(table,point))
         table.verticalScrollBar().valueChanged.connect(lambda *_:self.artwork_timer.start())
         return table
+
+    def fit_columns(self,table,flexible,widths):
+        from PySide6.QtWidgets import QHeaderView
+        header=table.horizontalHeader();header.setStretchLastSection(False);header.setMinimumSectionSize(42)
+        for column,width in widths.items():table.setColumnWidth(column,width)
+        for column in flexible:header.setSectionResizeMode(column,QHeaderView.ResizeMode.Stretch)
+
+    def column_menu(self,table,point):
+        menu=QMenu(self)
+        def toggle(column,visible):
+            table.setColumnHidden(column,not visible)
+            self.catalogue.set_setting(table.column_settings_key,[i for i in range(table.columnCount()) if table.isColumnHidden(i)])
+        for column in range(table.columnCount()):
+            action=menu.addAction(table.horizontalHeaderItem(column).text());action.setCheckable(True)
+            action.setChecked(not table.isColumnHidden(column))
+            action.setEnabled(column!=0)
+            action.toggled.connect(lambda visible,c=column:toggle(c,visible))
+        menu.exec(table.horizontalHeader().mapToGlobal(point))
 
     def build_dashboard(self):
         layout=self.page()
@@ -498,6 +550,7 @@ class Window(QMainWindow):
         layout.addLayout(options)
         layout.addWidget(muted("FLAC output alone does not establish a lossless source. The completed queue shows the selected input format."))
         self.results_table=self.table(["Name","Artist / owner","Type","Length / tracks"])
+        self.results_table.set_empty_text('Find music on Spotify','Search above, or paste a track, album or playlist URL.')
         self.results_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.results_table.customContextMenuRequested.connect(self.results_context)
         self.results_table.setColumnWidth(0,420)
@@ -510,15 +563,18 @@ class Window(QMainWindow):
             ("Pause queue",self.pause_downloads,"SP_MediaPause"),("Retry failed",self.retry_downloads,"SP_BrowserReload"),
             ('Download next',self.download_selected_next,'SP_ArrowUp'),('Move up',lambda:self.move_queue_selection(-1),'SP_ArrowUp'),
             ('Move down',lambda:self.move_queue_selection(1),'SP_ArrowDown'),('Remove selected',self.remove_selected_downloads,'SP_DialogCancelButton')]:
-            button=self.button(text,action,icon);self.download_buttons[text]=button;actions.addWidget(button)
+            button=self.button(text,action,icon,primary=text in {'Queue selected','Start / resume queue'});self.download_buttons[text]=button
+            if text not in {'Move up','Move down'}:actions.addWidget(button)
         self.results_table.itemSelectionChanged.connect(self.update_download_controls)
         actions.addStretch()
         layout.addLayout(actions)
         self.downloads_table=self.table(['#',"Track","Artist",'Playlist / source',"State","Progress","Details"])
+        self.downloads_table.set_empty_text('Your download queue is empty','Search for music, then choose Queue selected. You can also queue missing tracks from Playlists.')
         self.downloads_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.downloads_table.setItemDelegate(DownloadDelegate(self.downloads_table,lambda:self.theme))
         self.downloads_table.customContextMenuRequested.connect(self.downloads_context)
         for i,width in enumerate([42,280,180,210,100,160]):self.downloads_table.setColumnWidth(i,width)
+        self.fit_columns(self.downloads_table,[1,2,6],{0:42,3:150,4:85,5:125})
         self.downloads_table.itemSelectionChanged.connect(self.update_download_controls)
         remove=QAction(self.downloads_table);remove.setShortcut(QKeySequence('Delete'));remove.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         remove.triggered.connect(self.remove_selected_downloads);self.downloads_table.addAction(remove)
@@ -527,6 +583,7 @@ class Window(QMainWindow):
         self.queue_summary=muted("Queue empty")
         layout.addWidget(self.queue_summary)
         row=QHBoxLayout()
+        for text in ['Move up','Move down']:row.addWidget(self.download_buttons[text])
         for text,fn,icon in [('Playlist priority…',self.queue_playlist_priority,'SP_FileDialogListView'),
                 ('Clear finished',self.clear_finished_downloads,'SP_DialogCancelButton'),('Clear queue…',self.clear_download_queue,'SP_DialogCancelButton')]:
             button=self.button(text,fn,icon);self.download_buttons[text]=button;row.addWidget(button)
@@ -619,6 +676,8 @@ class Window(QMainWindow):
         self.playlist_filter.addItems(["All playlists","Local","Spotify linked","Rekordbox linked"])
         self.playlist_filter.currentIndexChanged.connect(self.refresh_playlists)
         left.addWidget(self.playlist_filter)
+        self.playlist_name_search=self.search_bar('Find a playlist')
+        self.playlist_name_search.textChanged.connect(self.filter_playlist_names);left.addWidget(self.playlist_name_search)
         self.playlist_list=PlaylistTree()
         self.playlist_list.setIconSize(QSize(20,20))
         self.playlist_list.setItemDelegate(RowDelegate(self.playlist_list,lambda:self.theme))
@@ -635,10 +694,13 @@ class Window(QMainWindow):
         self.playlist_summary=muted("Select a playlist")
         right.addWidget(self.playlist_summary)
         self.entries_table=self.table(["#","Title","Artist","Length","Local match",'BPM'])
+        self.entries_table.set_empty_text('Choose a playlist','Select a playlist on the left, or create one to start organising tracks.')
+        self.entries_table.itemSelectionChanged.connect(self.update_entry_controls)
         self.entries_table.customContextMenuRequested.connect(self.entries_context)
         self.entries_table.itemDoubleClicked.connect(lambda item:self.play_row(item.data(ROLE)))
         for index,width in enumerate([45,360,240,80]):
             self.entries_table.setColumnWidth(index,width)
+        self.fit_columns(self.entries_table,[1,2],{0:42,3:65,4:125,5:60})
         right.addWidget(self.entries_table,1)
         actions=QHBoxLayout()
         self.up_button=self.button("Move up",lambda:self.move_entry(-1),"SP_ArrowUp")
@@ -650,6 +712,8 @@ class Window(QMainWindow):
         actions.addStretch()
         right.addLayout(actions)
         splitter.addWidget(panel)
+        splitter.widget(0).setMinimumWidth(240);splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0,0);splitter.setStretchFactor(1,1)
         splitter.setSizes([250,1050])
         layout.addWidget(splitter,1)
         right.addWidget(muted("Sync all linked → Queue missing → download → Sync with Rekordbox → review and Apply."))
@@ -1127,12 +1191,23 @@ class Window(QMainWindow):
         self.catalogue.set_setting('library_known_roots',[(self.files_table.topLevelItem(i).data(0,ROLE) or {})['root_id'] for i in range(self.files_table.topLevelItemCount())])
 
     def fill_table(self,table,rows,values):
+        # Stable identities keep selection and keyboard focus attached to tracks
+        # when background downloads or a preview refresh rebuild the table.
+        def identity(row):return row.get('song_id') or row.get('id') or row.get('recording_id') or row.get('spotify_id')
+        selected={identity(table.item(i.row(),0).data(ROLE) or {}) for i in table.selectionModel().selectedRows() if table.item(i.row(),0)}-{None}
+        current=table.item(table.currentRow(),0)
+        current_id=identity(current.data(ROLE) or {}) if current else None
+        vertical=table.verticalScrollBar().value();horizontal=table.horizontalScrollBar().value()
+        rendered=[[str(value) for value in values(i,row)] for i,row in enumerate(rows)]
+        if getattr(table,'_rendered_rows',None)==rows and getattr(table,'_rendered_values',None)==rendered:
+            return
         self._thumb_bindings=self.catalogue.bindings()
         self._thumbnail_files={f["recording_id"]:f for f in reversed(self.catalogue.files()) if f["available"]}
         block=QSignalBlocker(table)
+        table.setUpdatesEnabled(False);table.clearSelection()
         table.setRowCount(len(rows))
         for index,row in enumerate(rows):
-            for column,value in enumerate(values(index,row)):
+            for column,value in enumerate(rendered[index]):
                 item=QTableWidgetItem(str(value))
                 item.setData(ROLE,row)
                 item.setToolTip(str(value))
@@ -1140,11 +1215,18 @@ class Window(QMainWindow):
                 if column==(1 if table.horizontalHeaderItem(0).text()=="#" else 0):
                     item.setIcon(self.track_thumbnail(row))
                     item.setData(ROLE+1,self.thumbnail_path(row))
+            key=identity(row)
+            if key in selected:table.selectionModel().select(table.model().index(index,0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
+            if key is not None and key==current_id:table.setCurrentCell(index,0,QItemSelectionModel.SelectionFlag.NoUpdate)
+        table.verticalScrollBar().setValue(vertical);table.horizontalScrollBar().setValue(horizontal)
+        table._rendered_rows=copy.deepcopy(rows);table._rendered_values=rendered
+        table.setUpdatesEnabled(True);table.update_empty_state()
         del block
         self.artwork_timer.start()
 
     def refresh_playlists(self):
         previous=self.playlist_id
+        vertical=self.playlist_list.verticalScrollBar().value();horizontal=self.playlist_list.horizontalScrollBar().value()
         kept={((item.data(ROLE) or item.data(ROLE+2))['id']) for item in self.playlist_list.selectedItems() if item.data(ROLE) or item.data(ROLE+2)}
         block=QSignalBlocker(self.playlist_list)
         self.playlist_list._stop_hover()
@@ -1186,8 +1268,25 @@ class Window(QMainWindow):
         if remaining and preserve_selection:
             self.playlist_list.clearSelection()
             for item in remaining:item.setSelected(True)
+        self.playlist_list.verticalScrollBar().setValue(vertical);self.playlist_list.horizontalScrollBar().setValue(horizontal)
         del block
         self.refresh_entries()
+        self.filter_playlist_names()
+
+    def filter_playlist_names(self,*_):
+        query=self.playlist_name_search.text().strip().casefold()
+        expanded=set(self.catalogue.get_setting('playlist_expanded',[]))
+        def visit(item,ancestor_matches=False):
+            own_match=bool(query and query in item.text(0).casefold())
+            child_matches=[visit(item.child(i),ancestor_matches or own_match) for i in range(item.childCount())]
+            matches=not query or ancestor_matches or own_match or any(child_matches)
+            item.setHidden(not matches)
+            if query and child_matches and any(child_matches):item.setExpanded(True)
+            elif not query and getattr(self,'playlist_search_active',False):item.setExpanded(bool(item.data(ROLE+2) and item.data(ROLE+2)['id'] in expanded))
+            return matches
+        with QSignalBlocker(self.playlist_list):
+            for i in range(self.playlist_list.topLevelItemCount()):visit(self.playlist_list.topLevelItem(i))
+        self.playlist_search_active=bool(query)
 
     def refresh_entries(self,*_):
         item=self.playlist_list.currentItem()
@@ -1203,9 +1302,9 @@ class Window(QMainWindow):
         self.fill_table(self.entries_table,entries,lambda i,row:[str(i+1),row["title"],row["artist"],duration(row["duration"]),
             row["match_state"].capitalize() if row["spotify_id"] else (("Local extra · " if playlist and playlist['source']=='spotify' else '')+("Available" if self.catalogue.available_recording(row["recording_id"]) else "Missing")),self.bpm_text(row)])
         manual=bool(playlist and playlist["source"]=="manual")
-        for control in [self.up_button,self.down_button,self.remove_entry_button]:
-            control.setEnabled(manual)
-            control.setVisible(False)
+        for control in [self.up_button,self.down_button,self.remove_entry_button]:control.setVisible(manual)
+        self.entries_table.set_empty_text('This playlist is empty' if playlist else 'Choose a playlist', 'Drag local tracks here or add them from Local Music.' if manual else 'Sync this playlist or select another on the left.')
+        self.update_entry_controls()
         review_count=len({e['spotify_id'] for e in entries if e['match_state']=='review' and e['spotify_id']})
         self.review_button.setVisible(bool(review_count))
         self.review_button.setText(f'Review needed ({review_count})…')
@@ -1218,6 +1317,13 @@ class Window(QMainWindow):
         with self.catalogue.connect() as db:review=db.execute("SELECT count(DISTINCT spotify_id) FROM entries WHERE match_state='review'").fetchone()[0]
         self.review_all_button.setVisible(bool(review));self.review_all_button.setText(f'Review all ({review})')
 
+    def update_entry_controls(self):
+        selected=self.entries_table.selectionModel().selectedRows()
+        row=selected[0].row() if len(selected)==1 else -1
+        self.up_button.setEnabled(row>0)
+        self.down_button.setEnabled(row>=0 and row<self.entries_table.rowCount()-1)
+        self.remove_entry_button.setEnabled(bool(selected))
+
     def bpm_text(self,row):
         bpm=row.get('bpm',0)
         if bpm<=0:bpm=getattr(self,'recording_bpms',{}).get(row.get('recording_id'),0)
@@ -1225,6 +1331,8 @@ class Window(QMainWindow):
 
     def refresh_live(self):
         self.refresh_downloads()
+        if not getattr(self,'library_refresh_needed',True):return
+        self.library_refresh_needed=False
         self.refresh_files()
         self.refresh_playlists()
         if self.playlist_tabs.currentIndex()==2:self.all_tracks.refresh()
@@ -1232,18 +1340,19 @@ class Window(QMainWindow):
     def update_download_controls(self):
         if not hasattr(self,"download_buttons"):return
         jobs=self.catalogue.download_jobs()
-        self.download_buttons["Queue selected"].setVisible(self.download_tabs.currentIndex()==0 and bool(self.results_table.selectionModel().selectedRows()))
-        self.download_buttons["Retry failed"].setVisible(any(j["state"]=="failed" for j in jobs))
-        self.download_buttons["Pause queue"].setVisible(self.download_job is not None)
-        self.download_buttons["Start / resume queue"].setVisible(self.download_job is None and any(j["state"] in {"queued","paused"} for j in jobs))
         on_queue=self.download_tabs.currentIndex()==1;selected=self.selected_downloads()
+        for label,button in self.download_buttons.items():button.setVisible(on_queue if label!='Queue selected' else not on_queue)
+        self.download_buttons['Queue selected'].setEnabled(bool(self.results_table.selectionModel().selectedRows()) and not self.job)
+        self.download_buttons['Retry failed'].setEnabled(any(j['state']=='failed' for j in jobs) and not self.job)
+        self.download_buttons['Pause queue'].setEnabled(self.download_job is not None)
+        self.download_buttons['Start / resume queue'].setEnabled(self.download_job is None and any(j['state'] in {'queued','paused'} for j in jobs) and not self.job)
         pending=bool(selected and all(j['state'] in {'queued','paused','failed'} for j in selected))
-        for label in ['Download next','Move up','Move down']:self.download_buttons[label].setVisible(on_queue and pending)
-        self.download_buttons['Remove selected'].setVisible(on_queue and bool(selected))
-        self.download_buttons['Clear queue…'].setVisible(on_queue and bool(jobs))
-        self.download_buttons['Clear finished'].setVisible(on_queue and any(j['state'] in {'complete','cancelled'} for j in jobs))
+        for label in ['Download next','Move up','Move down']:self.download_buttons[label].setEnabled(pending)
+        self.download_buttons['Remove selected'].setEnabled(bool(selected))
+        self.download_buttons['Clear queue…'].setEnabled(bool(jobs))
+        self.download_buttons['Clear finished'].setEnabled(any(j['state'] in {'complete','cancelled'} for j in jobs))
         sources={s['id'] for j in jobs if j['state'] in {'queued','paused','failed'} for s in j['sources']} | ({'direct'} if any(not j['sources'] and j['state'] in {'queued','paused','failed'} for j in jobs) else set())
-        self.download_buttons['Playlist priority…'].setVisible(on_queue and len(sources)>1)
+        self.download_buttons['Playlist priority…'].setEnabled(len(sources)>1)
 
     def refresh_downloads(self):
         jobs=self.catalogue.download_jobs()
@@ -1418,6 +1527,7 @@ class Window(QMainWindow):
             self.status.setText("A task is already running")
             return
         self.job=Job(work,self)
+        self.rb_panel.update_actions();self.update_download_controls()
         self.status.setText(label)
         self.activity.show()
         self.cancel_button.setVisible(cancellable)
@@ -1435,6 +1545,7 @@ class Window(QMainWindow):
     def job_finished(self):
         self.job.deleteLater()
         self.job=None
+        self.rb_panel.update_actions()
         self.activity.hide()
         self.cancel_button.setVisible(bool(self.scan_job))
         self.refresh()
@@ -1534,10 +1645,11 @@ class Window(QMainWindow):
             self.show_error(exc)
 
     def remove_entry(self):
-        row=self.entries_table.currentRow()
-        if row>=0:
+        selected=self.entries_table.selectionModel().selectedRows()
+        if selected:
             try:
-                self.catalogue.remove_entry(self.playlist_id,self.entries_table.item(row,0).data(ROLE)["id"])
+                ids=[self.entries_table.item(row.row(),0).data(ROLE)['id'] for row in selected]
+                for id_ in ids:self.catalogue.remove_entry(self.playlist_id,id_)
                 self.refresh_playlists()
             except Exception as exc:
                 self.show_error(exc)
@@ -1902,8 +2014,10 @@ class Window(QMainWindow):
         elif kind=="connected":
             self.pending_login=None
             self.zotify_status.setText("Zotify: connected")
-        elif not self.download_refresh.isActive():
-            self.download_refresh.start()
+        else:
+            # Streaming progress changes queue rows, not the library hierarchy.
+            if value!='progress':self.library_refresh_needed=True
+            if not self.download_refresh.isActive():self.download_refresh.start()
 
     def open_pending_login(self):
         if self.pending_login:
@@ -1959,10 +2073,25 @@ class Window(QMainWindow):
         def recolour_folder(item):
             if (item.data(0,ROLE) or {}).get("kind")=="folder":
                 item.setIcon(0,self.icon("SP_DirIcon"))
+            elif (item.data(0,ROLE) or {}).get('kind')=='file':item.setIcon(0,self.track_thumbnail(item.data(0,ROLE)))
             for index in range(item.childCount()):
                 recolour_folder(item.child(index))
         for index in range(self.files_table.topLevelItemCount()):
             recolour_folder(self.files_table.topLevelItem(index))
+        for item in self.playlist_list.playlist_items():item.setIcon(0,self.icon('SP_FileDialogListView'))
+        def recolour_playlists(item,native=False):
+            if native:
+                playlist=next((p for p in self.rb_panel.data['playlists'] if p['id']==item.data(0,ROLE)),None)
+                item.setIcon(0,self.icon('SP_DirIcon' if playlist and playlist['type']==1 else 'SP_FileDialogListView'))
+            elif item.data(ROLE+2):item.setIcon(0,self.icon('SP_DirIcon'))
+            for index in range(item.childCount()):recolour_playlists(item.child(index),native)
+        for index in range(self.playlist_list.topLevelItemCount()):recolour_playlists(self.playlist_list.topLevelItem(index))
+        for index in range(self.rb_panel.tree.topLevelItemCount()):recolour_playlists(self.rb_panel.tree.topLevelItem(index),True)
+        for table in self.findChildren(QTableWidget):
+            for row in range(table.rowCount()):
+                for column in range(table.columnCount()):
+                    item=table.item(row,column)
+                    if item and not item.icon().isNull():item.setIcon(self.track_thumbnail(item.data(ROLE) or {}))
         self.centralWidget().update()
         for view in [self.files_table,self.entries_table,self.results_table,self.downloads_table]:
             view.viewport().update()

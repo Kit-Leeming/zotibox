@@ -16,6 +16,7 @@ class RekordboxPanel(QWidget):
         self.owner=owner
         self.backend=Rekordbox(owner.catalogue)
         self.preview_loaded=False
+        self.confirm_pending=False
         self.data={"tracks":[],"playlists":[],"colors":[],"changes":[]}
         layout=QVBoxLayout(self);layout.setContentsMargins(0,12,0,0)
         bar=QHBoxLayout();self.tree_buttons={}
@@ -30,7 +31,9 @@ class RekordboxPanel(QWidget):
         self.running_timer.timeout.connect(self.refresh_running_status);self.running_timer.start()
         self.refresh_running_status()
         self.search=owner.search_bar("Search Rekordbox collection or selected playlist")
-        self.search.textChanged.connect(self.refresh_tracks);layout.addWidget(self.search)
+        self.search_timer=QTimer(self);self.search_timer.setSingleShot(True);self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self.refresh_tracks)
+        self.search.textChanged.connect(lambda:self.search_timer.start());layout.addWidget(self.search)
         split=QSplitter()
         from .themes import RowDelegate
         self.tree=type(owner.files_table)(lambda:owner.theme)
@@ -46,22 +49,30 @@ class RekordboxPanel(QWidget):
             action=QAction(self.tree);action.setShortcut(QKeySequence(key));action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut);action.triggered.connect(fn);self.tree.addAction(action)
         split.addWidget(self.tree)
         self.table=owner.table(["#","Title","Artist","Genre","Rating","Colour","Length",'BPM'])
+        self.table.set_empty_text('No tracks here', 'Refresh Rekordbox to load your collection, or select a playlist on the left.')
         self.table.setColumnWidth(7,75);self.table.horizontalHeader().moveSection(7,3)
         for column,width in enumerate([45,300,210,160,75,100,70]):self.table.setColumnWidth(column,width)
+        owner.fit_columns(self.table,[1,2],{0:42,3:100,4:55,5:65,6:60,7:55})
         self.table.customContextMenuRequested.connect(self.track_context)
         self.table.itemDoubleClicked.connect(lambda item:self.owner.play_row(item.data(ROLE)))
         self.table.setContentsMargins(8,0,0,0)
         split.setHandleWidth(12)
-        split.addWidget(self.table);split.setSizes([260,1050]);layout.addWidget(split,1)
+        split.addWidget(self.table);self.tree.setMinimumWidth(220);split.setChildrenCollapsible(False)
+        split.setStretchFactor(0,0);split.setStretchFactor(1,1);split.setSizes([260,1050]);layout.addWidget(split,1)
         bar=QHBoxLayout()
         bar.addStretch();bar.addWidget(owner.row_size_control());layout.addLayout(bar)
         self.summary=QLabel("Connect to Rekordbox in Settings, or refresh to inspect a copy of its library.")
         self.summary.setWordWrap(True);layout.addWidget(self.summary)
         bar=QHBoxLayout()
-        for text,fn,icon in [("Preview changes…",self.preview,"SP_FileDialogContentsView"),("Apply to Rekordbox",self.apply,"SP_DialogApplyButton"),
+        self.change_buttons={}
+        for text,fn,icon in [("Review changes…",self.preview,"SP_FileDialogContentsView"),("Apply to Rekordbox",self.apply,"SP_DialogApplyButton"),
+                ('Undo last edit',self.undo,'SP_ArrowBack'),
                 ("Discard preview",self.discard,"SP_DialogCancelButton")]:
-            bar.addWidget(owner.button(text,fn,icon))
+            button=owner.button(text,fn,icon,primary=text=='Apply to Rekordbox');self.change_buttons[text]=button;bar.addWidget(button)
         bar.addStretch();layout.addLayout(bar)
+        for view in [self.tree,self.table]:
+            action=QAction(view);action.setShortcut(QKeySequence('Ctrl+Z'));action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut);action.triggered.connect(self.undo);view.addAction(action)
+        self.change_buttons['Undo last edit'].setToolTip('Undo the last preview edit (Ctrl+Z in the playlist or track list). The live library is unchanged.')
         self.refresh_tree()
 
     def setup_dragdrop(self):
@@ -125,12 +136,21 @@ class RekordboxPanel(QWidget):
 
     def loaded(self,data):
         self.preview_loaded=True
+        identities=data.pop('_identities',None)
+        if identities:
+            current=self.current_playlist()
+            if current in identities['playlists']:data['_selection']=identities['playlists'][current]
+            for i in range(self.table.rowCount()):
+                row=dict(self.table.item(i,0).data(ROLE))
+                row['id']=identities['tracks'].get(row['id'],row['id'])
+                if row.get('song_id'):row['song_id']=identities['songs'].get(row['song_id'],row['song_id'])
+                for column in range(self.table.columnCount()):self.table.item(i,column).setData(ROLE,row)
         self.data=data;self.refresh_tree()
         if hasattr(self.owner,'all_tracks') and self.owner.playlist_tabs.currentIndex()==2:self.owner.all_tracks.refresh()
         self.owner.status.setText("Rekordbox preview updated; live library is unchanged")
 
     def connect(self):
-        self.task("Reading Rekordbox",self.backend.connect)
+        self.owner.start_job('Refreshing Rekordbox · keeping pending edits',self.backend.refresh_preserving,self.loaded)
 
     def change(self,label,work):
         def run():
@@ -145,6 +165,7 @@ class RekordboxPanel(QWidget):
         return item.data(0,ROLE) if item else None
 
     def refresh_tree(self):
+        vertical=self.tree.verticalScrollBar().value();horizontal=self.tree.horizontalScrollBar().value()
         reveal=self.data.get("_selection") is not None
         kept={item.data(0,ROLE) for item in self.tree.selectedItems()}
         previous=self.data.pop("_selection",None) or self.current_playlist()
@@ -170,10 +191,26 @@ class RekordboxPanel(QWidget):
             parent=chosen.parent()
             while parent:parent.setExpanded(True);parent=parent.parent()
         self.tree.blockSignals(False)
+        if not reveal:self.tree.verticalScrollBar().setValue(vertical);self.tree.horizontalScrollBar().setValue(horizontal)
         self.refresh_tracks()
+        self.update_actions()
         n=len(self.data["changes"])
         skipped=sum(len(rows) for rows in (self.backend.state or {}).get("skipped_tracks",{}).values())
         self.summary.setText(f"{len(self.data['tracks'])} tracks · {n} pending change(s). Changes affect only the preview until Apply."+(f" {skipped} missing track(s) skipped; download/match and resync to add them." if skipped else ""))
+
+    def update_actions(self):
+        busy=bool(getattr(self.owner,'job',None))
+        pending=len((self.backend.state or {}).get('changes',[]))
+        if hasattr(self,'change_buttons'):
+            for button in self.change_buttons.values():button.setEnabled(bool(pending) and not busy)
+            self.change_buttons['Apply to Rekordbox'].setText(f'Review & apply ({pending})…' if pending else 'Apply to Rekordbox')
+            self.change_buttons['Apply to Rekordbox'].setToolTip('Refresh the library, keep your edits, then review before applying. Close Rekordbox first.')
+            self.change_buttons['Undo last edit'].setEnabled(bool((self.backend.state or {}).get('history')) and not busy)
+        self.tree_buttons['Refresh Rekordbox'].setText('Refresh & keep changes' if pending else 'Refresh Rekordbox')
+        self.tree_buttons['Refresh Rekordbox'].setToolTip('Reload Rekordbox without discarding your pending edits.')
+        for button in self.tree_buttons.values():button.setEnabled(not busy)
+        current=next((p for p in self.data['playlists'] if p['id']==self.current_playlist()),None)
+        for label in ['Rename','Delete…']:self.tree_buttons[label].setEnabled(not busy and bool(current and current['type'] in {0,1}))
 
     def save_expansion(self,*_):
         expanded=[]
@@ -233,7 +270,9 @@ class RekordboxPanel(QWidget):
         rows=[dict(tracks[s["track_id"]],song_id=s["id"],position=s["position"]) for s in playlist["songs"] if s["track_id"] in tracks] if playlist else list(tracks.values()) if id_ is None else []
         query=self.search.text().casefold()
         rows=[r for r in rows if query in " ".join(str(r[k]) for k in ["title","artist","album","genre"]).casefold()]
+        self.table.set_empty_text('No matching tracks' if query else 'No tracks here', 'Try another search or clear the search field.' if query else 'Select a playlist or refresh Rekordbox to load its tracks.')
         self.owner.fill_table(self.table,rows,lambda i,r:[r.get("position",i+1),r["title"],r["artist"],r["genre"],"★"*r["rating"],r["color"],f"{int(r['duration'])//60}:{int(r['duration'])%60:02d}",f"{r.get('bpm',0):g}" if r.get('bpm',0)>0 else ''])
+        if hasattr(self,'change_buttons'):self.update_actions()
 
     def refresh_running_status(self):
         self.running_warning.setVisible(running())
@@ -368,7 +407,29 @@ class RekordboxPanel(QWidget):
             if not self.owner.catalogue.get_setting("rekordbox_write_enabled",False):raise ValueError("Enable database writes in Settings > Rekordbox first")
             changes=self.backend.state["changes"] if self.backend.state else []
             if not changes:return
-            if QMessageBox.question(self,"Apply Rekordbox changes","\n".join(changes)+"\n\nA complete backup is created when Rekordbox has changed externally. Otherwise the previous verified backup is retained.")!=QMessageBox.StandardButton.Yes:return
+            def prepared(data):
+                self.loaded(data);self.confirm_pending=True
+                QTimer.singleShot(0,self.confirm_apply)
+            self.owner.start_job('Refreshing and checking your Rekordbox changes',self.backend.refresh_preserving,prepared)
+        except Exception as exc:self.owner.show_error(exc)
+
+    def confirm_apply(self):
+        if not self.confirm_pending:return
+        if self.owner.job:QTimer.singleShot(30,self.confirm_apply);return
+        self.confirm_pending=False
+        try:
+            self.owner.ensure_idle();closed()
+            changes=(self.backend.state or {}).get('changes',[])
+            if not changes:return
+            dialog=QDialog(self);dialog.setWindowTitle('Review & apply to Rekordbox');dialog.resize(650,460)
+            layout=QVBoxLayout(dialog)
+            label=QLabel(f'{len(changes)} pending changes · refreshed against the current Rekordbox library');label.setWordWrap(True);layout.addWidget(label)
+            listing=QListWidget();listing.addItems(changes);listing.setWordWrap(True);layout.addWidget(listing,1)
+            note=QLabel('Apply uses a verified backup. A new complete backup is created if Rekordbox has changed externally. Cancel keeps your preview.');note.setWordWrap(True);layout.addWidget(note)
+            buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Apply|QDialogButtonBox.StandardButton.Cancel)
+            buttons.button(QDialogButtonBox.StandardButton.Apply).setText('Apply to Rekordbox')
+            buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+            if not dialog.exec():return
             def work(progress,cancel):
                 message=self.backend.apply(progress,cancel)
                 return message,self.backend.view()
@@ -378,15 +439,23 @@ class RekordboxPanel(QWidget):
         except Exception as exc:self.owner.show_error(exc)
 
     def discard(self):
+        if self.owner.job:return
         if QMessageBox.question(self,"Discard preview","Discard all pending Rekordbox changes and reload the library?")==QMessageBox.StandardButton.Yes:
             self.task("Refreshing Rekordbox",self.backend.discard)
+
+    def undo(self):
+        if self.owner.job or not (self.backend.state or {}).get('history'):return
+        self.task('Undoing last preview edit',self.backend.undo)
 
     def sync_local(self):
         id_=self.owner.playlist_id
         if not id_:return
         if self.owner.job:self.owner.status.setText("Wait for the current task before linking a Rekordbox playlist");return
         if not self.backend.state or not self.preview_loaded:
-            def complete(data):self.loaded(data);self.sync_local()
+            def continue_link():
+                if self.owner.job:QTimer.singleShot(30,continue_link);return
+                self.sync_local()
+            def complete(data):self.loaded(data);QTimer.singleShot(0,continue_link)
             self.owner.start_job("Reading Rekordbox playlists",lambda progress,cancel:self.backend.view() if self.backend.state else self.backend.connect(),complete)
             return
         playlist=next(p for p in self.owner.catalogue.playlists() if p["id"]==id_)

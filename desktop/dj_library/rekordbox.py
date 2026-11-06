@@ -1,6 +1,7 @@
 """Rekordbox changes are prepared on an isolated copy, then explicitly applied."""
 from __future__ import annotations
 import json
+import copy
 import os
 import shutil
 import threading
@@ -161,18 +162,70 @@ class Rekordbox:
             if xml.exists():shutil.copy2(xml,folder/xml.name)
             if fingerprint(source)!=before:
                 raise ValueError("Rekordbox changed while connecting; refresh again after closing Rekordbox")
+            previous=self.state
             self.state={"session":session,"source":str(source),"fingerprint":before,"changes":[],"links":{}}
-            self.save()
-            return self.view()
+            try:
+                result=self.view();self.save();return result
+            except Exception:
+                self.state=previous;raise
+
+    def refresh_preserving(self,progress=lambda *a:None,cancel=None):
+        """Replay pending edits on a fresh private copy; publish only on success."""
+        from .rekordbox_recovery import PreviewConflict,prepare,translate
+        with LOCK:
+            if not self.state or not self.state['changes']:return self.connect()
+            previous=copy.deepcopy(self.state)
+            if str(self.source)!=previous['source']:
+                raise PreviewConflict('The selected Rekordbox database changed. Your preview is kept; select its original database before refreshing.')
+            local_changed=any(not (playlist:=next((p for p in self.catalogue.playlists() if p['id']==id_),None)) or
+                playlist['name']!=snapshot['name'] or self.catalogue.entries(id_)!=snapshot['entries']
+                for id_,snapshot in previous.get('local_snapshots',{}).items())
+            if fingerprint(self.source)==previous['fingerprint'] and not local_changed:return self.view()
+            recipes=previous.get('recipes',[])
+            if len(recipes)!=len(previous['changes']):
+                raise PreviewConflict('This preview contains older edits or file organisation changes that cannot be refreshed automatically. Your preview is kept. Apply it against its original library, or export/review it before discarding.')
+            # The candidate never publishes pending.json while replaying. A crash,
+            # cancellation or failed edit leaves the original recoverable preview.
+            candidate=Rekordbox(self.catalogue)
+            candidate.state=None;candidate.load_error=None;candidate.save=lambda:None
+            progress(0,'Refreshing Rekordbox and keeping your edits')
+            candidate.connect();identities={'playlists':{},'tracks':{},'songs':{}}
+            view=candidate.view()
+            for index,recipe in enumerate(recipes):
+                if cancel and cancel.is_set():raise InterruptedError('Refresh cancelled; your pending changes are kept')
+                progress(index,f"Keeping edit {index+1} of {len(recipes)}")
+                method,args=prepare(recipe,view,identities)
+                count=len(candidate.state.get('recipes',[]))
+                try:getattr(candidate,method)(*args)
+                except (ValueError,StopIteration) as exc:
+                    raise PreviewConflict(f"Could not keep edit {index+1}: {previous['changes'][index]}. {exc}\nYour pending changes are kept; undo the conflicting edit or resolve its source before retrying.") from exc
+                generated=candidate.state['recipes'][-1]['created'] if len(candidate.state.get('recipes',[]))>count else {'playlists':[],'tracks':[],'songs':[]}
+                generated=copy.deepcopy(generated)
+                view=candidate.view()
+                generated['tracks']=[{k:t[k] for k in ('id','path')} for t in view['tracks']]
+                translate(recipe['created'],generated,identities)
+            if cancel and cancel.is_set():raise InterruptedError('Refresh cancelled; your pending changes are kept')
+            if fingerprint(self.source)!=candidate.state['fingerprint']:
+                raise PreviewConflict('Rekordbox changed again during refresh. Your pending changes are kept; close Rekordbox and retry.')
+            self.verify(candidate.staged)
+            result=candidate.view()
+            result['_identities']=identities
+            atomic_json(self.state_path,candidate.state)
+            self.state=candidate.state
+            return result
 
     def save(self):
         atomic_json(self.state_path,self.state)
 
     def discard(self):
         with LOCK:
-            if self.state:
-                self.state["changes"]=[]
-            return self.connect()
+            previous=copy.deepcopy(self.state)
+            try:
+                self.state=None
+                return self.connect()
+            except Exception:
+                self.state=previous
+                raise
 
     def view(self):
         with LOCK,database(self.staged) as db:
@@ -206,8 +259,13 @@ class Rekordbox:
             colors=[{"id":c.ID,"name":c.Commnt or c.ID} for c in db.get_color()]
             return {"tracks":tracks,"playlists":playlists,"colors":colors,"changes":list(self.state["changes"])}
 
-    def stage(self,label,operation):
+    def stage(self,label,operation,recipe=None):
         with LOCK:
+            from .rekordbox_recovery import capture,created
+            before=self.view() if recipe else None
+            record=capture(before,*recipe) if recipe else None
+            history=copy.deepcopy({key:value for key,value in self.state.items() if key not in {'history','recipes'}})
+            history['recipe_count']=len(self.state.get('recipes',[]))
             # Failed operations cannot leave partial modifications in the preview.
             previous=self.staged.parent
             destination=self.root/"sessions"/str(uuid.uuid4())
@@ -223,10 +281,32 @@ class Rekordbox:
                 db.commit=lambda autoinc=True:commit_copy(db)
                 result=operation(db)
                 commit_copy(db)
-            self.state["session"]=destination.name
-            self.state["changes"].append(label)
-            self.save()
+            previous=copy.deepcopy(self.state)
+            try:
+                self.state["session"]=destination.name
+                self.state["changes"].append(label)
+                self.state.setdefault('history',[]).append(history)
+                if record is not None:
+                    record['created']=created(before,self.view())
+                    self.state.setdefault('recipes',[]).append(record)
+                self.save()
+            except Exception:
+                self.state=previous;raise
             return result
+
+    def undo(self):
+        """Restore the last successful private preview without touching Rekordbox."""
+        with LOCK:
+            if not self.state or not self.state.get('history'):raise ValueError('There is no preview edit to undo')
+            history=self.state['history'];previous=copy.deepcopy(history[-1])
+            count=previous.pop('recipe_count')
+            previous['recipes']=copy.deepcopy(self.state.get('recipes',[])[:count])
+            previous['history']=copy.deepcopy(history[:-1])
+            current=self.state
+            try:
+                self.state=previous;result=self.view();self.save();return result
+            except Exception:
+                self.state=current;raise
 
     def relocate_files(self,mapping,merge=False,replace_audio=False):
         """Prepare path/identity changes on the preview, including ANLZ PPTH.
@@ -337,11 +417,11 @@ class Rekordbox:
                 if p.Attribute!=1:raise ValueError("The parent must be a playlist folder")
             create=db.create_playlist_folder if folder else db.create_playlist
             return create(name.strip(),parent=parent).ID
-        return self.stage(f"Create {'folder' if folder else 'playlist'}: {name}",operation)
+        return self.stage(f"Create {'folder' if folder else 'playlist'}: {name}",operation,('create_playlist',[name,parent,folder]))
 
     def rename_playlist(self,id_,name):
         if not name.strip():raise ValueError("Enter a name")
-        return self.stage(f"Rename playlist/folder to {name}",lambda db:db.rename_playlist(self.playlist(db,id_),name.strip()))
+        return self.stage(f"Rename playlist/folder to {name}",lambda db:db.rename_playlist(self.playlist(db,id_),name.strip()),('rename_playlist',[id_,name]))
 
     def move_playlist(self,id_,parent=None):
         def operation(db):
@@ -355,7 +435,7 @@ class Rekordbox:
                     seen.add(ancestor.ID);ancestor=db.get_playlist(ID=ancestor.ParentID) if ancestor.ParentID else None
             db.move_playlist(playlist,parent=parent or 'root')
             return id_
-        return self.stage('Move playlist/folder',operation)
+        return self.stage('Move playlist/folder',operation,('move_playlist',[id_,parent]))
 
     def delete_playlist(self,id_):
         view=self.view();items={p["id"]:p for p in view["playlists"]}
@@ -366,7 +446,7 @@ class Rekordbox:
             if children<=deleted:break
             deleted|=children
         if deleted&SPECIAL:raise ValueError("System playlists cannot be deleted")
-        self.stage(f"Delete {'folder and descendants' if items[id_]['type']==1 else 'playlist'}: {items[id_]['name']}",lambda db:db.delete_playlist(self.playlist(db,id_)))
+        self.stage(f"Delete {'folder and descendants' if items[id_]['type']==1 else 'playlist'}: {items[id_]['name']}",lambda db:db.delete_playlist(self.playlist(db,id_)),('delete_playlist',[id_]))
         self.state.setdefault("deleted_playlists",[]).extend(sorted(deleted))
         for local,target in list(self.state["links"].items()):
             if target in deleted:
@@ -380,7 +460,7 @@ class Rekordbox:
                 content=db.get_content(ID=track_id)
                 if not content:raise ValueError("Track no longer exists")
                 db.add_to_playlist(playlist,content)
-        return self.stage(f"Add {len(tracks)} track(s) to playlist",operation)
+        return self.stage(f"Add {len(tracks)} track(s) to playlist",operation,('add_tracks',[id_,list(tracks)]))
 
     def delete_playlists(self,ids):
         import copy
@@ -397,7 +477,7 @@ class Rekordbox:
         except Exception:self.state=previous;self.save();raise
 
     def remove_song(self,playlist_id,song_id):
-        return self.stage("Remove playlist entry",lambda db:db.remove_from_playlist(self.playlist(db,playlist_id,True),song_id))
+        return self.remove_songs(playlist_id,[song_id])
 
     def remove_songs(self,playlist_id,song_ids):
         def operation(db):
@@ -405,10 +485,10 @@ class Rekordbox:
             existing={song.ID for song in playlist.Songs}
             if not set(song_ids)<=existing:raise ValueError("Playlist changed; refresh before removing entries")
             for id_ in dict.fromkeys(song_ids):db.remove_from_playlist(playlist,id_)
-        return self.stage(f"Remove {len(song_ids)} playlist entries",operation)
+        return self.stage(f"Remove {len(song_ids)} playlist entries",operation,('remove_songs',[playlist_id,list(song_ids)]))
 
     def move_song(self,playlist_id,song_id,position):
-        return self.stage(f"Move playlist entry to position {position}",lambda db:db.move_song_in_playlist(self.playlist(db,playlist_id,True),song_id,position))
+        return self.stage(f"Move playlist entry to position {position}",lambda db:db.move_song_in_playlist(self.playlist(db,playlist_id,True),song_id,position),('move_song',[playlist_id,song_id,position]))
 
     def edit_track(self,id_,values):
         allowed={"title","artist","album","genre","key","label","comment","year","track_no","rating","color_id"}
@@ -426,8 +506,10 @@ class Rekordbox:
                     ("genre","GenreID",tables.DjmdGenre),("key","KeyID",tables.DjmdKey),("label","LabelID",tables.DjmdLabel)]:
                 if key in values:setattr(row,column,name_id(db,table,values[key]))
         before=next(t for t in self.view()["tracks"] if t["id"]==id_)
+        values={key:value for key,value in values.items() if before[key]!=value}
+        if not values:return
         detail="; ".join(f"{key}: {before[key]!s} → {value!s}" for key,value in values.items() if before[key]!=value)
-        return self.stage(f"Metadata: {before['title']} — {detail}",operation)
+        return self.stage(f"Metadata: {before['title']} — {detail}",operation,('edit_track',[id_,values]))
 
     def sync_local(self,playlist_id,target=None):
         local=next(p for p in self.catalogue.playlists() if p["id"]==playlist_id)
@@ -486,7 +568,7 @@ class Rekordbox:
             ordered.extend(sorted(extras,key=lambda s:s.TrackNo))
             for index,song in enumerate(ordered,1):db.move_song_in_playlist(playlist,song,index)
             return playlist.ID
-        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped; {converted} MP3 compatibility copies)",operation)
+        result=self.stage(f"Sync local playlist {local['name']} ({len(paths)} available entries; {len(skipped)} missing skipped; {converted} MP3 compatibility copies)",operation,('sync_local',[playlist_id,target]))
         self.state.setdefault("local_snapshots",{})[playlist_id]={"name":local["name"],"entries":entries,
             "files":[{"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths]}
         self.state["links"][playlist_id]=result
@@ -501,7 +583,7 @@ class Rekordbox:
             songs={s.ID:s for s in playlist.Songs}
             if len(song_ids)!=len(set(song_ids)) or set(song_ids)!=set(songs):raise ValueError("Playlist changed; refresh before reordering")
             for position,song_id in enumerate(song_ids,1):db.move_song_in_playlist(playlist,songs[song_id],position)
-        return self.stage("Reorder Rekordbox playlist",operation)
+        return self.stage("Reorder Rekordbox playlist",operation,('reorder_playlist',[id_,list(song_ids)]))
 
     def add_recordings(self,playlist_id,recording_ids):
         files=self.catalogue.files();paths=[]
@@ -529,7 +611,7 @@ class Rekordbox:
                 content=matches[0] if matches else db.add_content(path,Title=row["title"],Length=int(row["duration"]),ISRC=row.get('isrc') or None,BPM=round(max(0,row.get('bpm',0))*100) or None,ArtistID=name_id(db,tables.DjmdArtist,row["artist"]),AlbumID=name_id(db,tables.DjmdAlbum,row["album"]))
                 if not content.GenreID and row.get('genre'):content.GenreID=name_id(db,tables.DjmdGenre,row['genre'])
                 existing[key]=[content];db.add_to_playlist(playlist,content)
-        result=self.stage(f"Add {len(paths)} local track(s) to Rekordbox playlist",operation)
+        result=self.stage(f"Add {len(paths)} local track(s) to Rekordbox playlist",operation,('add_recordings',[playlist_id,list(recording_ids)]))
         self.state.setdefault("imported_files",[]).extend({"path":str(path),"size":row["size"],"mtime_ns":row["mtime_ns"]} for path,row in paths)
         self.save();return result
 
@@ -696,7 +778,7 @@ class Rekordbox:
             if wal.exists() and wal.stat().st_size:
                 raise ValueError("Rekordbox has an uncheckpointed journal. Open and fully close Rekordbox, then refresh the preview")
             if str(self.source)!=self.state["source"] or fingerprint(self.source)!=self.state["fingerprint"]:
-                raise ValueError("Rekordbox changed since the preview. Discard the preview and refresh before applying")
+                raise ValueError("Rekordbox changed since the preview. Use Refresh & keep changes, then review and apply again. Your pending changes are kept.")
             self.verify(self.staged)
             progress(0,"Checking Rekordbox changes since the last ZotiBox apply")
             files=self.native_files(cancel)

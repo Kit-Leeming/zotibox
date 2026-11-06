@@ -4,6 +4,7 @@ import shutil
 import sys
 import zipfile
 import struct
+import subprocess
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -36,12 +37,11 @@ for name in ["mutagen", "PySide6", "PySide6_Essentials", "PySide6_Addons", "shib
 python_license = Path(sys.base_prefix) / "LICENSE.txt"
 if python_license.is_file():
     shutil.copyfile(python_license, licences / "Python-LICENSE.txt")
-output = generated / "ZotiBox-Source-0.14.0.zip"
+output = generated / "ZotiBox-Source-0.15.0.zip"
 with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-    for directory in ["desktop", "tests", "scripts", "docs", "build"]:
-        for path in (root / directory).rglob("*"):
-            if path.is_file() and not any(part in {"generated", "__pycache__", "dj_library_desktop.egg-info"} for part in path.relative_to(root).parts):
-                archive.write(path, path.relative_to(root).as_posix())
-    for name in ["pyproject.toml", "requirements-build.txt", "requirements-lock.txt", "README.md", "THIRD-PARTY-NOTICES.md"]:
-        archive.write(root / name, name)
+    tracked=subprocess.check_output(['git','ls-files','-z'],cwd=root).decode('utf-8').split('\0')
+    for relative in tracked:
+        path=root/relative
+        if relative and path.is_file() and (relative.split('/')[0] in {'desktop','tests','scripts','docs','build'} or relative in {'pyproject.toml','requirements-build.txt','requirements-lock.txt','README.md','THIRD-PARTY-NOTICES.md'}):
+            archive.write(path,relative)
 print(f"Prepared licence notices and {output}")

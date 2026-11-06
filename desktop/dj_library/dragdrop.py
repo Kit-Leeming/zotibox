@@ -2,7 +2,7 @@
 import json
 from PySide6.QtCore import Qt,QMimeData,QTimer,QObject,QEvent
 from PySide6.QtGui import QDrag,QPainter,QPen
-from PySide6.QtWidgets import QTableWidget,QListWidget
+from PySide6.QtWidgets import QTableWidget,QListWidget,QLabel
 MIME="application/x-zotibox-tracks"
 
 def decode(mime):
@@ -95,7 +95,28 @@ class DragMixin:
         if data and callback and callback(data,event.position().toPoint()):self._accept_drag(event)
         else:event.ignore()
 
-class TrackTable(DragMixin,QTableWidget):pass
+class TrackTable(DragMixin,QTableWidget):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.empty_label=QLabel(self.viewport());self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True);self.empty_label.setProperty('muted',True)
+        self.empty_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.set_empty_text('No tracks to display','')
+        self.model().rowsInserted.connect(self.update_empty_state)
+        self.model().rowsRemoved.connect(self.update_empty_state)
+        self.model().modelReset.connect(self.update_empty_state)
+
+    def set_empty_text(self,title,detail=''):
+        self.empty_label.setText(title+('\n\n'+detail if detail else ''))
+        self.setAccessibleDescription(self.empty_label.text());self.update_empty_state()
+
+    def update_empty_state(self,*_):
+        self.empty_label.setGeometry(self.viewport().rect().adjusted(24,12,-24,-12))
+        self.empty_label.setVisible(self.rowCount()==0)
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self,'empty_label'):self.update_empty_state()
 class PlaylistList(DragMixin,QListWidget):pass
 
 class HoverNavigation(QListWidget):

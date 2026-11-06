@@ -59,6 +59,10 @@ Paste a Spotify playlist into search to create a new sync. Spotify controls its 
 
 **Sync with Rekordbox** lets you choose multiple playlists to create or update. Missing files are skipped, including when creating an empty playlist; sync again after downloading. Rekordbox changes stay in a preview until Apply. Right-click a playlist and choose **Link / sync with Rekordbox** to choose an existing target. Existing native extras and the target name are kept; later syncs remove only songs previously managed by ZotiBox.
 
+**Review & apply** refreshes Rekordbox and carries supported pending edits forward before confirmation. **Refresh & keep changes** does the same without applying; **Undo last edit** backs out one preview edit. Conflicts preserve your pending work. Older previews and file-organisation edits may need manual review.
+
+Use **Ctrl+F** to focus search and **Ctrl+1–5** to switch pages. Find playlists by name above their tree. In local playlists, **Alt+Up/Down** reorders an entry and **Delete** removes selected entries. Right-click table headings to choose visible columns.
+
 In **Downloads → Download queue**, drag pending tracks to reorder, choose **Download next**, or use **Playlist priority** to move whole playlists ahead. Shared tracks download once. Right-click actions apply to the selected rows; **Remove selected** removes entries, and **Clear queue** removes the whole list while keeping downloaded music. Removing the active entry stops it and resumes the remaining queue unless paused.
 
 **Downloads** offers **Auto**, **MP3**, **FLAC** and **Original**, plus a separate source preference. Auto uses FLAC where available and MP3 320 kbps otherwise; FLAC requires a lossless source, and Original preserves the selected codec.

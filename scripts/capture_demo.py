@@ -1,5 +1,5 @@
 """Capture public UI screenshots with generated music and fictional metadata only."""
-import sys,uuid,wave,time
+import sys,uuid,wave,time,argparse
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'desktop'))
 from PySide6.QtCore import Qt,QBuffer,QIODevice
@@ -10,6 +10,12 @@ from mutagen.id3 import TIT2,TPE1,TALB,APIC,TBPM
 from dj_library.ui import Window
 
 root=Path(__file__).resolve().parents[1]
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output',type=Path,default=root/'docs'/'images')
+parser.add_argument('--width',type=int,default=1500)
+parser.add_argument('--height',type=int,default=920)
+parser.add_argument('--theme',default='Charcoal / Mint')
+args=parser.parse_args()
 workspace=root/'.tmp'/('public-demo-'+uuid.uuid4().hex)
 music=workspace/'Music';music.mkdir(parents=True)
 app=QApplication([]);window=Window(workspace/'Database');window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
@@ -43,13 +49,23 @@ c.move_playlist_item(p,warm)
 for name,parent in [('Opening set',warm),('Main room',peak),('Closing set',folder)]:
     local=c.create_playlist(name);c.move_playlist_item(local,parent);c.add_entries(local,[r['recording_id'] for r in c.files()[:6]])
     if name=='Opening set':compare_id=local;c.add_entries(local,[r['recording_id'] for r in c.files()[-2:]])
-c.set_setting('playlist_expanded',[folder,warm,peak]);window.playlist_id=p;window.refresh();window.resize(1500,920);window.show()
-window.workspace_label.setText('Demo music library');output=root/'docs'/'images';output.mkdir(parents=True,exist_ok=True)
+c.set_setting('playlist_expanded',[folder,warm,peak]);window.playlist_id=p;window.refresh();window.resize(args.width,args.height);window.choose_theme_preset(args.theme);window.show()
+window.workspace_label.setText('Demo music library');output=args.output;output.mkdir(parents=True,exist_ok=True)
 def capture(name,page):
     window.navigation.setCurrentRow(page)
     for _ in range(40):app.processEvents();time.sleep(.015)
-    image=window.grab().toImage();image=image.scaledToWidth(1500,Qt.TransformationMode.SmoothTransformation);image.save(str(output/name))
+    window.grab().save(str(output/name))
 window.files_table.expandAll();capture('local-music.png',2);capture('playlists.png',3)
+from PySide6.QtCore import QItemSelectionModel
+native=window.rb_panel;previous_state=native.backend.state;previous_data=native.data
+native.backend.state={'changes':['Rename playlist: Friday warm-up','Sync Friday warm-up · 8 matched tracks'],'history':[]}
+native.preview_loaded=True
+demo_tracks=[dict(row,id=str(i),path=str(c.resolve(row)),genre='House',rating=0,color='',bpm=120+i) for i,row in enumerate(c.files()[:8])]
+native.loaded({'tracks':demo_tracks,'playlists':[{'id':'demo-set','name':'Friday warm-up','parent':'root','type':0,'seq':1,
+    'songs':[{'id':f'song-{i}','track_id':t['id'],'position':i+1} for i,t in enumerate(demo_tracks)]}],
+    'colors':[],'changes':native.backend.state['changes']})
+window.playlist_tabs.setCurrentIndex(1);native.tree.setCurrentItem(native.tree.topLevelItem(1));capture('rekordbox-preview.png',3)
+native.backend.state=previous_state;native.data=previous_data;native.refresh_tree();window.playlist_tabs.setCurrentIndex(0)
 for i,t in enumerate(tracks[-4:]):c.enqueue(t['id'],{'key':'spotify:playlist:'+('9' if i%2==0 else '8')*22,'name':'Friday warm-up' if i%2==0 else 'Night drive','position':i})
 job=c.download_jobs()[0];c.update_download(job['id'],state='running',progress=42,message='Downloading · real-time speed')
 window.download_job=object();window.refresh_downloads();window.download_tabs.setCurrentIndex(1);window.downloads_table.selectRow(1);capture('downloads.png',1)
@@ -72,4 +88,4 @@ window.rb_panel.preview_loaded=True
 window.navigation.setCurrentRow(3);window.playlist_tabs.setCurrentIndex(2);window.all_tracks.unassigned.setChecked(True)
 capture('all-tracks.png',3)
 window.download_job=None;window.close()
-print('Captured demo screenshots in docs/images')
+print(f'Captured demo screenshots in {output} at {window.width()} x {window.height()}')

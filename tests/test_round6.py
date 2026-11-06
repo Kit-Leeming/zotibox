@@ -56,7 +56,7 @@ def test_spotify_drop_is_protected_and_download_buttons_are_contextual(tmp_path,
     errors=[];monkeypatch.setattr(window,'show_error',lambda error:errors.append(str(error)))
     payload={'workspace':str(window.catalogue.workspace),'recordings':[]}
     assert not window.drop_local(payload,QPoint(0,0));assert 'Spotify' in errors[0]
-    assert window.download_buttons['Retry failed'].isHidden()
+    assert not window.download_buttons['Retry failed'].isEnabled()
     assert window.download_buttons['Queue selected'].isHidden()
     window.close()
 

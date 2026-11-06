@@ -1,7 +1,7 @@
 """Virtual library playlist with effective-version membership and date sorting."""
 import os
 from datetime import datetime,timezone
-from PySide6.QtCore import Qt,QSignalBlocker
+from PySide6.QtCore import Qt,QSignalBlocker,QItemSelectionModel,QTimer
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QCheckBox,QLabel,QTableWidgetItem,QMenu
 from .playlist_picker import choose_playlist
 
@@ -56,12 +56,15 @@ class AllTracks(QWidget):
         self.unassigned=QCheckBox('Not in any playlist');bar.addWidget(self.unassigned)
         bar.addWidget(owner.button('Refresh Rekordbox memberships',self.load_native,'SP_BrowserReload'))
         self.table=owner.table(['Title','Artist','Genre','BPM','Added / downloaded','Playlists','File'])
+        self.table.set_empty_text('No tracks to display','Add a music folder in Local Music and scan it to build your library.')
         self.table.setDragEnabled(True);self.table.drag_payload=lambda:owner.drag_data(self.selected())
         self.table.setSelectionMode(self.table.SelectionMode.ExtendedSelection)
         self.table.itemDoubleClicked.connect(lambda item:owner.play_row(item.data(ROLE)))
         self.table.customContextMenuRequested.connect(self.context);box.addWidget(self.table,1)
         self.summary=QLabel();self.summary.setWordWrap(True);box.addWidget(self.summary)
-        self.search.textChanged.connect(self.refresh);self.unassigned.toggled.connect(self.refresh)
+        self.search_timer=QTimer(self);self.search_timer.setSingleShot(True);self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(lambda:self.search_timer.start());self.unassigned.toggled.connect(self.refresh)
         self.table.sortItems(4,Qt.SortOrder.DescendingOrder);self.table.setSortingEnabled(True)
         for i,width in enumerate([300,200,150,70,170,300]):self.table.setColumnWidth(i,width)
 
@@ -76,8 +79,12 @@ class AllTracks(QWidget):
         panel=self.owner.rb_panel
         rows=tracks(self.owner.catalogue,panel.data);needle=self.search.text().casefold()
         rows=[r for r in rows if (not self.unassigned.isChecked() or not r['playlists']) and needle in ' '.join([r['title'],r['artist'],r.get('genre') or '',r['relative_path']]).casefold()]
+        self.table.set_empty_text('No matching tracks' if needle or self.unassigned.isChecked() else 'Your library is empty', 'Try clearing the search or changing the playlist filter.' if needle or self.unassigned.isChecked() else 'Add and scan music folders from Local Music.')
         selected={r['recording_id'] for r in self.selected()};column=self.table.horizontalHeader().sortIndicatorSection();order=self.table.horizontalHeader().sortIndicatorOrder()
+        current=self.table.item(self.table.currentRow(),0);current_id=current.data(ROLE)['recording_id'] if current else None
+        vertical=self.table.verticalScrollBar().value();horizontal=self.table.horizontalScrollBar().value()
         block=QSignalBlocker(self.table);self.table.setSortingEnabled(False);self.table.setRowCount(len(rows))
+        self.table.clearSelection();self.table.setUpdatesEnabled(False)
         for i,row in enumerate(rows):
             stamp=datetime.fromtimestamp(row['added_time']).strftime('%Y-%m-%d %H:%M') if row['added_time'] else ''
             values=[row['title'],row['artist'],row.get('genre') or '',f"{row['bpm']:g}" if row['bpm']>0 else '',stamp,', '.join(row['playlists']),row['relative_path']]
@@ -87,8 +94,13 @@ class AllTracks(QWidget):
                 elif j==3:item.setData(ROLE+2,row['bpm'])
                 if j==0:item.setIcon(self.owner.track_thumbnail(row));item.setData(ROLE+1,row['path'])
                 self.table.setItem(i,j,item)
-            if row['recording_id'] in selected:self.table.selectRow(i)
         self.table.setSortingEnabled(True);self.table.sortItems(max(0,column),order)
+        for i in range(self.table.rowCount()):
+            key=self.table.item(i,0).data(ROLE)['recording_id']
+            if key in selected:self.table.selectionModel().select(self.table.model().index(i,0),QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Rows)
+            if key==current_id:self.table.setCurrentCell(i,0,QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.table.verticalScrollBar().setValue(vertical);self.table.horizontalScrollBar().setValue(horizontal)
+        self.table.setUpdatesEnabled(True);self.table.update_empty_state()
         suffix='' if panel.preview_loaded else ' · Rekordbox memberships not loaded; refresh to include them.'
         self.summary.setText(f'{len(rows)} tracks'+suffix)
 

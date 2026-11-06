@@ -182,18 +182,24 @@ def stylesheet(theme):
         #card {{ background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; }}
         QPushButton {{ font-family:'Segoe UI'; background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; padding:8px 12px; }}
         QPushButton:hover {{ border-color:{theme['accent']['start']}; }}
+        QPushButton:focus {{ border:1px solid {theme['accent']['start']}; outline:2px solid {theme['accent']['start']}; }}
+        QPushButton:pressed {{ background:{t['border']}; }}
         QPushButton:disabled {{ color:{t['muted']}; }}
         #windowcontrol, #windowclose {{background:transparent;border:0;border-radius:0;padding:0;font-size:20px;}}
         #windowcontrol:hover {{background:{t['surface']};}}
         #windowclose:hover {{background:#b83a42;color:white;}}
         QPushButton[primary=true] {{ background:{t['accent']}; color:{t['selection_text']}; border-color:{theme['accent']['start']}; font-weight:600; }}
+        QPushButton[primary=true]:disabled {{ background:{t['surface']}; color:{t['muted']}; border-color:{t['border']}; }}
+        QPushButton[primary=true]:pressed {{ background:{t['selection']}; border-color:{t['foreground']}; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background:{t['surface']}; border:1px solid {t['border']}; border-radius:6px; padding:9px; }}
         QLineEdit:focus, QComboBox:focus {{ border-color:{theme['accent']['start']}; }}
+        QSpinBox:focus, QDoubleSpinBox:focus {{ border-color:{theme['accent']['start']}; }}
         QComboBox::drop-down {{ border:0; width:26px; }}
         QComboBox QAbstractItemView {{ background:{t['surface']}; color:{t['foreground']}; border:1px solid {t['border']}; outline:0; selection-background-color:{theme['selection']['start']}; selection-color:{t['selection_text']}; padding:4px; }}
         QComboBox QAbstractItemView::item {{ min-height:28px; padding:5px; }}
         QTableWidget, QTreeWidget, QListWidget {{ background:{t['surface']}; alternate-background-color:{t['alternate']}; border:1px solid {t['border']}; border-radius:6px; outline:0; selection-background-color:{theme['selection']['start']}; selection-color:{t['selection_text']}; }}
         QTreeWidget::item, QTableWidget::item {{ border:0; border-radius:0; margin:0; padding:0; }}
+        QTableWidget:focus, QTreeWidget:focus, QListWidget:focus {{ border-color:{theme['accent']['start']}; }}
         QHeaderView::section {{ background:{t['sidebar']}; color:{t['muted']}; padding:10px 8px; border:0; border-bottom:1px solid {t['border']}; }}
         QMenu {{ background:{t['surface']}; border:1px solid {t['border']}; padding:5px; }}
         QMenu::item {{ padding:8px 22px; }}
@@ -217,6 +223,8 @@ def stylesheet(theme):
         QTabWidget::pane {{border:0;}}
         QTabBar::tab {{background:{t['sidebar']};color:{t['muted']};padding:10px 18px;border-bottom:2px solid transparent;}}
         QTabBar::tab:selected {{background:{t['surface']};color:{t['foreground']};border-bottom-color:{theme['accent']['start']};}}
+        QTabBar::tab:hover {{color:{t['foreground']};}}
+        QToolTip {{background:{t['surface']};color:{t['foreground']};border:1px solid {t['border']};padding:6px;}}
     """
 
 
