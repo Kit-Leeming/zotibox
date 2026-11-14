@@ -150,7 +150,10 @@ class RekordboxPanel(QWidget):
         self.owner.status.setText("Rekordbox preview updated; live library is unchanged")
 
     def connect(self):
-        self.owner.start_job('Refreshing Rekordbox · keeping pending edits',self.backend.refresh_preserving,self.loaded)
+        def complete(data):
+            self.loaded(data)
+            self.owner.rb_startup_status.setText("Rekordbox preview is up to date.")
+        self.owner.start_job('Refreshing Rekordbox · keeping pending edits',self.backend.refresh_preserving,complete)
 
     def change(self,label,work):
         def run():

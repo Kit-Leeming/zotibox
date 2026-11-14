@@ -61,6 +61,8 @@ Paste a Spotify playlist into search to create a new sync. Spotify controls its 
 
 **Review & apply** refreshes Rekordbox and carries supported pending edits forward before confirmation. **Refresh & keep changes** does the same without applying; **Undo last edit** backs out one preview edit. Conflicts preserve your pending work. Older previews and file-organisation edits may need manual review.
 
+ZotiBox checks the Rekordbox library at startup by default. The check refreshes the preview and preserves pending edits; it does not apply them. To turn it off, use **Settings → Rekordbox**.
+
 Use **Ctrl+F** to focus search and **Ctrl+1–5** to switch pages. Find playlists by name above their tree. In local playlists, **Alt+Up/Down** reorders an entry and **Delete** removes selected entries. Right-click table headings to choose visible columns.
 
 In **Downloads → Download queue**, drag pending tracks to reorder, choose **Download next**, or use **Playlist priority** to move whole playlists ahead. Shared tracks download once. Right-click actions apply to the selected rows; **Remove selected** removes entries, and **Clear queue** removes the whole list while keeping downloaded music. Removing the active entry stops it and resumes the remaining queue unless paused.

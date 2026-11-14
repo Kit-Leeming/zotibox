@@ -4,6 +4,7 @@ import time
 import urllib.request
 from urllib.parse import parse_qs,urlparse
 import pytest
+import requests
 from dj_library.spotify import Spotify,SpotifyError,TokenStore,spotify_id
 from dj_library.catalogue import Catalogue
 
@@ -33,6 +34,15 @@ class Session:
 
 def item(track_id="A"*22):
     return {"item":{"id":track_id,"name":"Track","artists":[{"name":"Artist"}],"album":{"name":"Album"},"external_ids":{"isrc":"AUABC2600001"},"duration_ms":1000,"type":"track"}}
+
+def test_spotify_retries_interrupted_reads_without_reconnecting():
+    aborted=requests.ConnectionError("Connection aborted.",FileNotFoundError(2,"No such file or directory"))
+    session=Session({"me":[aborted,Response({"id":"test"})]})
+    assert Spotify(CLIENT,MemoryStore(),session).request("me")=={"id":"test"}
+    assert session.posts==[]
+    session=Session({"me":[aborted,aborted]})
+    with pytest.raises(SpotifyError,match="Could not connect to Spotify"):
+        Spotify(CLIENT,MemoryStore(),session).request("me")
 
 def test_complete_snapshot_preserves_order_and_repeated_occurrences():
     meta={"id":"P"*22,"name":"Set","snapshot_id":"s1","items":{"total":3}}

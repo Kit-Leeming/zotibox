@@ -5,14 +5,15 @@ import sys
 import hashlib
 import requests
 from pathlib import Path
+from .http_transport import send
 
-VERSION = "0.15.0"
+VERSION = "0.15.1"
 REPOSITORY = "Kit-Leeming/zotibox"
 
 
 def github_update(current=VERSION,session=None):
     session=session or requests.Session()
-    response=session.get(f"https://api.github.com/repos/{REPOSITORY}/releases/latest",headers={"Accept":"application/vnd.github+json"},timeout=20)
+    response=send(session.get,"GitHub",retry=True,url=f"https://api.github.com/repos/{REPOSITORY}/releases/latest",headers={"Accept":"application/vnd.github+json"},timeout=20)
     if response.status_code==404:return None
     if response.status_code in {403,429}:raise ValueError("GitHub update checks are temporarily rate limited; try again later")
     response.raise_for_status();release=response.json()
@@ -35,7 +36,7 @@ def download_update(update,folder,progress=lambda *a:None,cancel=None,session=No
     target=folder/update["name"];partial=target.with_suffix(".partial")
     try:
         digest=hashlib.sha256();received=0
-        with session.get(update["url"],stream=True,timeout=(15,45)) as response:
+        with send(session.get,"GitHub",retry=True,url=update["url"],stream=True,timeout=(15,45)) as response:
             response.raise_for_status()
             if not response.url.startswith("https://"):raise ValueError("Update redirected to an insecure location")
             with partial.open("wb") as stream:
@@ -47,6 +48,8 @@ def download_update(update,folder,progress=lambda *a:None,cancel=None,session=No
                     progress(round(100*received/max(1,update["size"])),f"{received//1048576} / {update['size']//1048576} MB")
         if received!=update["size"] or digest.hexdigest()!=update["sha256"]:raise ValueError("Installer checksum failed; nothing installed")
         partial.replace(target);return target
+    except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as exc:
+        raise ValueError("The GitHub installer download was interrupted. Try the update again.") from exc
     finally:partial.unlink(missing_ok=True)
 
 

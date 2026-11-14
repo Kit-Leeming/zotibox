@@ -879,6 +879,12 @@ class Window(QMainWindow):
         form.addWidget(self.startup_updates)
         form.addStretch()
         form=section("Rekordbox","SP_FileDialogListView","Read the collection and prepare changes on a copy. Live writes require explicit opt-in and an automatic backup.")
+        self.rb_startup=QCheckBox("Refresh the Rekordbox preview when ZotiBox starts")
+        self.rb_startup.setChecked(self.catalogue.get_setting("rekordbox_refresh_on_start",True))
+        self.rb_startup.toggled.connect(lambda value:self.catalogue.set_setting("rekordbox_refresh_on_start",value))
+        form.addWidget(self.rb_startup)
+        self.rb_startup_status=muted("")
+        form.addWidget(self.rb_startup_status)
         self.rb_path=QLineEdit(str(self.rb_panel.backend.source))
         self.rb_path.setReadOnly(True)
         form.addWidget(self.rb_path)
@@ -932,6 +938,7 @@ class Window(QMainWindow):
         self.start_job("Checking for updates",lambda progress,cancel:github_update() if self.update_source.currentIndex()==0 else find_update(self.update_folder.text()),complete)
 
     def schedule_startup_checks(self):
+        if self.catalogue.get_setting("rekordbox_refresh_on_start",True):self.refresh_rekordbox_at_start()
         if self.catalogue.get_setting('matching_revision',0)<2:
             QTimer.singleShot(500,self.upgrade_match_decisions)
         if not self.catalogue.get_setting('check_updates_on_start',True):return
@@ -944,6 +951,33 @@ class Window(QMainWindow):
                 try:self.integration_event.emit('startup_update_error',None)
                 except RuntimeError:pass
         threading.Thread(target=check,daemon=True,name='ZotiBox update check').start()
+
+    def refresh_rekordbox_at_start(self):
+        if self.close_pending or not self.rb_startup.isChecked():return
+        panel=self.rb_panel;backend=panel.backend
+        if not (backend.state or backend.load_error or backend.source.is_file() or self.catalogue.get_setting("rekordbox_path","")):return
+        if self.job:
+            QTimer.singleShot(500,self.refresh_rekordbox_at_start)
+            return
+        self.rb_startup_status.setText("Checking Rekordbox…")
+        def work(progress,cancel):
+            try:return backend.startup_preview(progress,cancel),""
+            except InterruptedError:raise
+            except Exception as exc:
+                # An unavailable or changed source must not hide the last readable preview.
+                try:view=backend.view() if backend.state else None
+                except Exception:view=None
+                return view,str(exc)
+        def complete(result):
+            view,error=result
+            if view is not None:panel.loaded(view)
+            if error:
+                detail=("Showing the saved preview. " if view is not None else "")+error
+                self.rb_startup_status.setText(detail)
+                panel.summary.setText(detail)
+                self.status.setText("Rekordbox refresh needs attention")
+            else:self.rb_startup_status.setText("Rekordbox preview is up to date.")
+        self.start_job("Checking Rekordbox preview",work,complete,cancellable=False)
 
     def upgrade_match_decisions(self):
         if self.close_pending:return
@@ -1075,6 +1109,7 @@ class Window(QMainWindow):
         self.pending_login=None
         self.rb_panel.backend=Rekordbox(self.catalogue)
         self.rb_panel.preview_loaded=False
+        self.rb_startup_status.clear()
         if self.rb_panel.backend.load_error:self.rb_panel.summary.setText("Saved preview cannot load: "+self.rb_panel.backend.load_error+". Refresh to reconnect; recovery data is retained.")
         if load_preview and self.rb_panel.backend.state:
             try:self.rb_panel.loaded(self.rb_panel.backend.view())
@@ -1085,6 +1120,7 @@ class Window(QMainWindow):
 
     def refresh(self):
         with QSignalBlocker(self.backup_limit):self.backup_limit.setValue(self.catalogue.get_setting('rekordbox_backup_limit',4))
+        with QSignalBlocker(self.rb_startup):self.rb_startup.setChecked(self.catalogue.get_setting("rekordbox_refresh_on_start",True))
         self.rb_path.setText(str(self.rb_panel.backend.source))
         self.rb_write.blockSignals(True);self.rb_write.setChecked(self.catalogue.get_setting("rekordbox_write_enabled",False));self.rb_write.blockSignals(False)
         self.workspace_label.setText(str(self.catalogue.workspace))

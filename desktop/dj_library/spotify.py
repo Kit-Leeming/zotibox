@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
+from .http_transport import send
 
 REDIRECT_URI = "http://127.0.0.1:4381/callback"
 SCOPES = "playlist-read-private playlist-read-collaborative"
@@ -134,7 +135,7 @@ class Spotify:
             raise InterruptedError("Spotify login cancelled")
         if not result.get("code"):
             raise SpotifyError("Spotify login was declined or timed out. Check the registered redirect URI.")
-        response = self.session.post("https://accounts.spotify.com/api/token", data={"grant_type": "authorization_code", "code": result["code"],
+        response = send(self.session.post, "Spotify login", SpotifyError, url="https://accounts.spotify.com/api/token", data={"grant_type": "authorization_code", "code": result["code"],
                                     "redirect_uri": REDIRECT_URI, "client_id": self.client_id, "code_verifier": verifier}, timeout=30)
         self.save_response(response)
         return self.request("me").get("display_name", "Connected")
@@ -157,7 +158,7 @@ class Spotify:
             if not token or token.get("client_id") != self.client_id:
                 raise SpotifyError("Connect Spotify in Settings / Setup first")
             if force or token["expires_at"] <= time.time():
-                response = self.session.post("https://accounts.spotify.com/api/token", data={"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": self.client_id}, timeout=30)
+                response = send(self.session.post, "Spotify login", SpotifyError, url="https://accounts.spotify.com/api/token", data={"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": self.client_id}, timeout=30)
                 token = self.save_response(response, token)
             return token["access_token"]
 
@@ -169,7 +170,7 @@ class Spotify:
         else:
             url = "https://api.spotify.com/v1/" + path.lstrip("/")
         for attempt in range(2):
-            response = self.session.get(url, params=params, headers={"Authorization": "Bearer " + self.access_token(force=bool(attempt))}, timeout=30)
+            response = send(self.session.get, "Spotify", SpotifyError, retry=True, url=url, params=params, headers={"Authorization": "Bearer " + self.access_token(force=bool(attempt))}, timeout=30)
             if response.status_code == 401 and attempt == 0:
                 continue
             if response.status_code == 429:

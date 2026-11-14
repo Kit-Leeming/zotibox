@@ -169,6 +169,17 @@ class Rekordbox:
             except Exception:
                 self.state=previous;raise
 
+    def startup_preview(self,progress,cancel):
+        """Read the current library, reusing a healthy, unchanged preview."""
+        with LOCK:
+            if cancel.is_set():raise InterruptedError("Rekordbox startup refresh cancelled")
+            if self.load_error:raise ValueError("The saved preview needs recovery. Use Refresh Rekordbox to reconnect.")
+            source=self.source
+            if not source.is_file():raise ValueError("Rekordbox master.db is unavailable. Check the database location in Settings.")
+            if self.state and not self.state['changes'] and self.state['source']==str(source) and self.staged.is_file() and fingerprint(source)==self.state['fingerprint']:
+                return self.view()
+            return self.refresh_preserving(progress,cancel)
+
     def refresh_preserving(self,progress=lambda *a:None,cancel=None):
         """Replay pending edits on a fresh private copy; publish only on success."""
         from .rekordbox_recovery import PreviewConflict,prepare,translate

@@ -1,5 +1,6 @@
 import hashlib
 import pytest
+import requests
 from dj_library.updates import github_update,download_update
 
 
@@ -43,3 +44,17 @@ def test_unpublished_prerelease_and_host_validation():
     with pytest.raises(ValueError,match='location'):github_update(session=Session(Response(data)))
     data=release();data['assets'][0]['digest']=None
     with pytest.raises(ValueError,match='digest'):github_update(session=Session(Response(data)))
+
+
+def test_update_check_retries_aborted_connection_and_reports_service():
+    class Interrupted:
+        def __init__(self, recover):self.calls=0;self.recover=recover
+        def get(self, **kwargs):
+            self.calls+=1
+            if self.calls>1 and self.recover:return Response(release())
+            raise requests.ConnectionError("Connection aborted.",FileNotFoundError(2,"No such file or directory"))
+    recovered=Interrupted(True)
+    assert github_update(session=recovered)['version']=='99.0.0' and recovered.calls==2
+    failed=Interrupted(False)
+    with pytest.raises(ValueError,match='Could not connect to GitHub'):github_update(session=failed)
+    assert failed.calls==2

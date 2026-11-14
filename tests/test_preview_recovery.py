@@ -11,6 +11,18 @@ from dj_library.rekordbox import Rekordbox,database,fingerprint
 from dj_library.rekordbox_recovery import PreviewConflict
 
 
+def test_startup_reuses_unchanged_preview_and_refreshes_external_edits(rb):
+    session=rb.state['session']
+    rb.startup_preview(lambda *_:None,threading.Event())
+    assert rb.state['session']==session
+    rb.edit_track('1',{'comment':'Keep pending'})
+    native_edit(rb);live=fingerprint(rb.source)
+    view=rb.startup_preview(lambda *_:None,threading.Event())
+    assert next(t for t in view['tracks'] if t['id']=='1')['comment']=='Keep pending'
+    assert next(t for t in view['tracks'] if t['id']=='2')['title']=='External edit'
+    assert view['changes'] and fingerprint(rb.source)==live
+
+
 def native_edit(rb,sql="UPDATE djmdContent SET Title='External edit' WHERE ID='2'"):
     with sqlite3.connect(rb.source) as db:db.execute(sql)
 

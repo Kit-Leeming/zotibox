@@ -108,10 +108,29 @@ def test_queue_time_is_hours_minutes_seconds_and_finish_is_local_clock(tmp_path)
 
 def test_startup_check_is_nonblocking_quiet_and_can_be_disabled(tmp_path,monkeypatch):
     app();window=Window(tmp_path/'db');window.catalogue.set_setting('matching_revision',2)
+    window.rb_startup.setChecked(False)
     calls=[];monkeypatch.setattr('dj_library.ui.github_update',lambda:calls.append(True) or {'version':'99.0.0'})
     window.schedule_startup_checks();pump_until(lambda:window.available_update is not None)
     assert calls==[True] and window.job is None and window.install_update_button.isEnabled()
     window.catalogue.set_setting('check_updates_on_start',False);window.schedule_startup_checks();assert calls==[True]
+    window.close()
+
+
+def test_startup_refreshes_rekordbox_without_opening_its_tab(rb,monkeypatch):
+    app();c=rb.catalogue;c.set_setting('matching_revision',2);c.set_setting('check_updates_on_start',False)
+    window=Window(c.workspace,defer_startup=True)
+    calls=[]
+    original=window.rb_panel.backend.startup_preview
+    def read(progress,cancel):
+        calls.append(True)
+        return original(progress,cancel)
+    monkeypatch.setattr(window.rb_panel.backend,'startup_preview',read)
+    window.schedule_startup_checks()
+    pump_until(lambda:window.job is None)
+    assert calls==[True] and window.rb_panel.preview_loaded and window.rb_panel.data['tracks']
+    assert 'up to date' in window.rb_startup_status.text()
+    window.rb_startup.setChecked(False);window.schedule_startup_checks()
+    assert calls==[True]
     window.close()
 
 
