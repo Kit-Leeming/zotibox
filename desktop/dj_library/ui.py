@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+from time import monotonic
 from html import escape
 from datetime import datetime,timedelta
 from pathlib import Path, PurePosixPath
@@ -11,7 +12,7 @@ from PySide6.QtCore import Qt, QEvent, QThread, QTimer, Signal, Slot, QSettings,
 from PySide6.QtGui import QColor, QIcon, QPixmap, QDesktopServices, QPalette, QPainter, QPen,QAction,QKeySequence
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QFrame,QLabel,
     QListWidget,QListWidgetItem,QStackedWidget,QPushButton,QLineEdit,QComboBox,QCheckBox,QTableWidget,QTableWidgetItem,
-    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider,QSpinBox)
+    QTreeWidget,QTreeWidgetItem,QSplitter,QFileDialog,QInputDialog,QMessageBox,QDialog,QDialogButtonBox,QMenu,QProgressBar,QScrollArea,QStyle,QTabWidget,QSlider,QSpinBox,QPlainTextEdit)
 from .dragdrop import DragMixin,TrackTable,PlaylistList,HoverNavigation,HoverTabs
 from .playlist_picker import choose_playlist
 from .playlist_tree import PlaylistTree,PlaylistItem
@@ -20,6 +21,7 @@ from .zotify_settings import ZotifySettings
 from .player import MusicPlayer
 from .audio_preferences import fill_formats,fill_qualities,value as audio_value
 from .artwork_async import ArtworkCache
+from .diagnostics import Diagnostics
 from .instance import acquire_lock
 from .file_actions import recycle
 from .catalogue import Catalogue
@@ -63,17 +65,26 @@ class Job(QThread):
     finished_result=Signal(object)
     failed=Signal(str)
     cancelled=Signal(str)
-    def __init__(self,work,parent):
+    def __init__(self,work,parent,operation="Background task"):
         super().__init__(parent)
         self.work=work
         self.cancel=threading.Event()
+        self.operation=operation
+        self.record=parent.diagnostics.record
     def run(self):
+        started=monotonic()
+        self.record(self.operation,"started")
         try:
-            self.finished_result.emit(self.work(self.progress.emit,self.cancel))
+            result=self.work(self.progress.emit,self.cancel)
         except InterruptedError as exc:
+            self.record(self.operation,"cancelled",elapsed_ms=round((monotonic()-started)*1000))
             self.cancelled.emit(str(exc))
         except Exception as exc:
+            self.record(self.operation,"failed",elapsed_ms=round((monotonic()-started)*1000),error=exc,frames=True)
             self.failed.emit(str(exc))
+        else:
+            self.record(self.operation,"completed",elapsed_ms=round((monotonic()-started)*1000))
+            self.finished_result.emit(result)
 
 class LibraryItem(QTreeWidgetItem):
     def __lt__(self,other):
@@ -112,6 +123,7 @@ class Window(QMainWindow):
         self.remember=remember
         self.workspace_lock=workspace_lock or self.lock_workspace(workspace)
         self.catalogue=Catalogue(workspace)
+        self.diagnostics=Diagnostics(self.catalogue.workspace,VERSION,self.catalogue.get_setting("diagnostics_enabled",True))
         self.artwork=ArtworkCache(self);self.artwork.ready.connect(self.artwork_ready)
         self.artwork_timer=QTimer(self);self.artwork_timer.setSingleShot(True);self.artwork_timer.setInterval(60);self.artwork_timer.timeout.connect(self.load_visible_art)
         self.theme=valid_theme(self.catalogue.get_setting("theme",make_theme()))
@@ -181,6 +193,7 @@ class Window(QMainWindow):
         self.setup_dragdrop()
         footer=QHBoxLayout()
         self.status=muted("Ready")
+        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse|Qt.TextInteractionFlag.TextSelectableByKeyboard)
         footer.addWidget(self.status,1)
         self.activity=QProgressBar()
         self.activity.setRange(0,0)
@@ -808,6 +821,9 @@ class Window(QMainWindow):
             bar.addWidget(self.button(text,action))
         bar.addStretch()
         form.addLayout(bar)
+        diagnostic_bar=QHBoxLayout()
+        diagnostic_bar.addWidget(self.button("View diagnostics…",self.show_diagnostics))
+        diagnostic_bar.addStretch();form.addLayout(diagnostic_bar)
         form.addStretch()
         form=section("Downloads","SP_ArrowDown","One track at a time. Remaining time is estimated from audio duration.")
         form.addWidget(QLabel("Zotify downloads"))
@@ -912,6 +928,16 @@ class Window(QMainWindow):
         bar.addStretch();form.addLayout(bar)
         self.rb_backups=QListWidget();self.rb_backups.setMinimumHeight(180);form.addWidget(self.rb_backups)
         self.refresh_rb_backups()
+        form.addStretch()
+        form=section("Diagnostics","SP_FileDialogInfoView","Review recent actions, timings and error types. Up to 128 KB is stored locally. No login data, track names, file paths or search terms are recorded.")
+        self.diagnostics_enabled=QCheckBox("Record local diagnostics")
+        self.diagnostics_enabled.setChecked(self.diagnostics.enabled)
+        self.diagnostics_enabled.toggled.connect(self.set_diagnostics_enabled)
+        form.addWidget(self.diagnostics_enabled)
+        bar=QHBoxLayout()
+        bar.addWidget(self.button("View diagnostics…",self.show_diagnostics))
+        bar.addWidget(self.button("Clear diagnostics",self.clear_diagnostics))
+        bar.addStretch();form.addLayout(bar)
         form.addStretch()
         self.settings_navigation.currentRowChanged.connect(self.settings_stack.setCurrentIndex)
         self.settings_navigation.setCurrentRow(0)
@@ -1104,7 +1130,7 @@ class Window(QMainWindow):
         if index==3:self.rb_panel.ensure_loaded()
 
     def reset_integrations(self,load_preview=True):
-        self.spotify=Spotify(self.catalogue.get_setting("spotify_client_id",""),TokenStore(self.catalogue.workspace))
+        self.spotify=Spotify(self.catalogue.get_setting("spotify_client_id",""),TokenStore(self.catalogue.workspace),record=self.diagnostics.record)
         self.engine=DownloadEngine(self.catalogue,self.integration_event.emit)
         self.pending_login=None
         self.rb_panel.backend=Rekordbox(self.catalogue)
@@ -1515,8 +1541,41 @@ class Window(QMainWindow):
         self.add_library_button.setVisible(bool(rows))
         self.details.setText(f"{len(rows)} file(s) selected"+(f" · {self.catalogue.resolve(rows[0])}" if len(rows)==1 else ""))
 
+    def copyable_message(self,title,text,icon=QMessageBox.Icon.Information):
+        box=QMessageBox(icon,title,text,QMessageBox.StandardButton.Ok,self)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse|Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        copy_button=box.addButton("Copy message",QMessageBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(lambda:QApplication.clipboard().setText(text))
+        box.exec()
+
     def show_error(self,error):
-        QMessageBox.warning(self,"ZotiBox",str(error))
+        if isinstance(error,BaseException):self.diagnostics.record("App action","failed",error=error,frames=True)
+        self.copyable_message("ZotiBox",str(error),QMessageBox.Icon.Warning)
+
+    def set_diagnostics_enabled(self,enabled):
+        self.catalogue.set_setting("diagnostics_enabled",enabled)
+        with self.diagnostics.lock:self.diagnostics.enabled=enabled
+
+    def clear_diagnostics(self):
+        try:
+            self.diagnostics.clear()
+            self.status.setText("Local diagnostics cleared")
+        except OSError as exc:self.show_error(exc)
+
+    def show_diagnostics(self):
+        dialog=QDialog(self);dialog.setWindowTitle("Local diagnostics");dialog.resize(760,420)
+        layout=QVBoxLayout(dialog)
+        layout.addWidget(muted("Use Copy report to share these entries when reporting a problem."))
+        report=QPlainTextEdit();report.setReadOnly(True);report.setAccessibleName("Local diagnostic report")
+        report.setPlainText(self.diagnostics.report() or "No diagnostics recorded yet.")
+        layout.addWidget(report,1)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        copy_button=buttons.addButton("Copy report",QDialogButtonBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(lambda:QApplication.clipboard().setText(report.toPlainText()))
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def ensure_idle(self):
         if self.job or self.download_job or self.scan_job:
@@ -1562,7 +1621,7 @@ class Window(QMainWindow):
         if self.job:
             self.status.setText("A task is already running")
             return
-        self.job=Job(work,self)
+        self.job=Job(work,self,label)
         self.rb_panel.update_actions();self.update_download_controls()
         self.status.setText(label)
         self.activity.show()
@@ -1611,7 +1670,7 @@ class Window(QMainWindow):
             self.add_root()
         if self.catalogue.roots():
             self._scan_revision=self.catalogue.file_revision
-            self.scan_job=Job(lambda progress,cancel:self.catalogue.scan(progress,cancel),self)
+            self.scan_job=Job(lambda progress,cancel:self.catalogue.scan(progress,cancel),self,"Scanning local music")
             self.scan_job.progress.connect(self.scan_progress)
             self.scan_job.finished_result.connect(self.scan_complete)
             self.scan_job.failed.connect(self.job_error)
@@ -1974,7 +2033,7 @@ class Window(QMainWindow):
         if self.job or self.download_job:
             return
         self.engine.cancel.clear()
-        self.download_job=Job(lambda progress,cancel:self.engine.authenticate(fresh=fresh),self)
+        self.download_job=Job(lambda progress,cancel:self.engine.authenticate(fresh=fresh),self,"Connecting Zotify")
         self.download_job.finished_result.connect(lambda text:self.status.setText(text))
         self.download_job.failed.connect(self.job_error)
         self.download_job.cancelled.connect(self.status.setText)
@@ -1987,14 +2046,14 @@ class Window(QMainWindow):
         path=self.catalogue.workspace/'.local'/'last-worker-error.json'
         detail=json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
         text='No diagnostic has been saved yet.' if not detail else str(detail.get('type','Download failure'))+'\n'+'\n'.join(f"{frame['file']}:{frame['line']} — {frame['function']}" for frame in detail.get('frames',[]))
-        QMessageBox.information(self,'Last download diagnostic',text)
+        self.copyable_message('Last download diagnostic',text)
 
     def start_downloads(self):
         if self.job and self.job.property('exclusive_files'):
             self.status.setText('Finish the file organisation operation before downloading');return
         if self.download_job:
             return
-        self.download_job=Job(lambda progress,cancel:self.engine.run_queue(),self)
+        self.download_job=Job(lambda progress,cancel:self.engine.run_queue(),self,"Running download queue")
         self.download_job.finished_result.connect(lambda text:self.status.setText(text))
         self.download_job.failed.connect(self.job_error)
         self.download_job.cancelled.connect(self.status.setText)
@@ -2185,6 +2244,8 @@ class Window(QMainWindow):
             raise
         self.workspace_lock.unlock()
         self.workspace_lock,self.catalogue=lock,catalogue
+        self.diagnostics=Diagnostics(catalogue.workspace,VERSION,catalogue.get_setting("diagnostics_enabled",True))
+        with QSignalBlocker(self.diagnostics_enabled):self.diagnostics_enabled.setChecked(self.diagnostics.enabled)
         if getattr(self,"instance",None):self.instance.rebind(path,lock)
         self.reset_integrations()
         self.client_edit.setText(catalogue.get_setting("spotify_client_id",""))

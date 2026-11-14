@@ -7,7 +7,7 @@ import requests
 from pathlib import Path
 from .http_transport import send
 
-VERSION = "0.15.1"
+VERSION = "0.15.2"
 REPOSITORY = "Kit-Leeming/zotibox"
 
 

@@ -51,6 +51,8 @@ The catalogue is stored in **ZotiBox Database** beside the application. Use **Se
 4. **Settings → Downloads:** choose the music destination and connect Zotify. Its streaming and developer authorisations may each open a browser. Saved valid logins are reused; use **Fresh Zotify login** to reconnect explicitly.
 5. **Settings → Rekordbox:** select `master.db` and connect. Rekordbox **7.2.11** is the tested version.
 
+If Spotify login fails, use **Settings → Spotify account → View diagnostics** to copy a local report. Error dialogs also have a **Copy message** button. **Settings → Diagnostics** lets you turn recording off or clear the report. The report records task names, timings, HTTP status codes and error types; it excludes login data, searches and library contents, and nothing is uploaded automatically.
+
 ## Spotify to Rekordbox
 
 **Link playlist → Sync all linked → Review needed → Queue missing → Start downloads → Sync with Rekordbox → Preview → Apply**

@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 from .http_transport import send
+from .spotify_token import token_post
 
 REDIRECT_URI = "http://127.0.0.1:4381/callback"
 SCOPES = "playlist-read-private playlist-read-collaborative"
@@ -90,10 +91,11 @@ def track_data(item):
 
 
 class Spotify:
-    def __init__(self, client_id, store, session=None):
+    def __init__(self, client_id, store, session=None, record=lambda *args, **kwargs: None):
         self.client_id = client_id.strip()
         self.store = store
         self.session = session or requests.Session()
+        self.record = record
         self.token_lock = threading.Lock()
 
     def authenticate(self, cancel, progress=lambda *args: None, opener=webbrowser.open):
@@ -125,6 +127,7 @@ class Spotify:
                  "scope": SCOPES, "state": state, "code_challenge_method": "S256", "code_challenge": challenge}
         progress(0, "Complete Spotify login in your browser")
         try:
+            self.record("Spotify browser login", "waiting for callback")
             opener("https://accounts.spotify.com/authorize?" + urlencode(query))
             deadline = time.monotonic() + 180
             while not result and not cancel.is_set() and time.monotonic() < deadline:
@@ -135,16 +138,32 @@ class Spotify:
             raise InterruptedError("Spotify login cancelled")
         if not result.get("code"):
             raise SpotifyError("Spotify login was declined or timed out. Check the registered redirect URI.")
-        response = send(self.session.post, "Spotify login", SpotifyError, url="https://accounts.spotify.com/api/token", data={"grant_type": "authorization_code", "code": result["code"],
-                                    "redirect_uri": REDIRECT_URI, "client_id": self.client_id, "code_verifier": verifier}, timeout=30)
+        self.record("Spotify browser login", "callback received")
+        response = token_post(self.session, {"grant_type": "authorization_code", "code": result["code"],
+                                    "redirect_uri": REDIRECT_URI, "client_id": self.client_id, "code_verifier": verifier},
+                              "Spotify code exchange", SpotifyError, self.record, fallback=True)
         self.save_response(response)
         return self.request("me").get("display_name", "Connected")
 
     def save_response(self, response, previous=None):
         if response.status_code != 200:
-            raise SpotifyError("Spotify authentication failed. Check your Client ID and reconnect.")
-        value = response.json()
-        if not value.get("access_token"):
+            details = ""
+            try:
+                code = response.json().get("error")
+                if code in ("invalid_grant", "invalid_client", "unauthorized_client", "invalid_request"):
+                    details = " · " + code
+            except (ValueError, AttributeError):
+                pass
+            if response.status_code == 429:
+                raise SpotifyError("Spotify is limiting login requests (HTTP 429). Wait a moment and retry.")
+            if response.status_code >= 500:
+                raise SpotifyError(f"Spotify login is temporarily unavailable (HTTP {response.status_code}). Try again later.")
+            raise SpotifyError(f"Spotify rejected the login (HTTP {response.status_code}{details}). Check your Client ID and reconnect.")
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise SpotifyError("Spotify returned an unreadable login response. Try again.") from exc
+        if not isinstance(value,dict) or not value.get("access_token"):
             raise SpotifyError("Spotify returned an incomplete login response")
         value["refresh_token"] = value.get("refresh_token") or (previous or {}).get("refresh_token")
         value["expires_at"] = time.time() + value.get("expires_in", 3600) - 60
@@ -158,7 +177,8 @@ class Spotify:
             if not token or token.get("client_id") != self.client_id:
                 raise SpotifyError("Connect Spotify in Settings / Setup first")
             if force or token["expires_at"] <= time.time():
-                response = send(self.session.post, "Spotify login", SpotifyError, url="https://accounts.spotify.com/api/token", data={"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": self.client_id}, timeout=30)
+                response = token_post(self.session, {"grant_type": "refresh_token", "refresh_token": token["refresh_token"], "client_id": self.client_id},
+                                      "Spotify token renewal", SpotifyError, self.record, fallback=True)
                 token = self.save_response(response, token)
             return token["access_token"]
 
