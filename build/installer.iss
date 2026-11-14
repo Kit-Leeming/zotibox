@@ -1,5 +1,5 @@
 #define AppName "ZotiBox"
-#define AppVersion "0.15.2"
+#define AppVersion "0.15.3"
 
 [Setup]
 AppId={{B2AD5EB7-0914-41C6-9482-ED8187149302}
@@ -14,7 +14,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\dist
-OutputBaseFilename=ZotiBox-Setup-0.15.2
+OutputBaseFilename=ZotiBox-Setup-0.15.3
 Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern

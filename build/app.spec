@@ -1,18 +1,23 @@
 from pathlib import Path
 import os
+import ssl
 from PyInstaller.utils.hooks import collect_submodules,collect_data_files,collect_dynamic_libs,copy_metadata
 
 root = Path(SPECPATH).parent
+# Some build runtimes load an additional certificate policy beside ssl.py.
+# Frozen modules resolve __file__ inside _internal; keep the policy beside it.
+ssl_policy = Path(ssl.__file__).with_name('codex-rejected-cas.pem')
+ssl_data = [(str(ssl_policy), '.')] if ssl_policy.is_file() else []
 a = Analysis(
     [str(root / 'desktop' / 'launcher.py')],
     pathex=[str(root / 'desktop')],
     binaries=collect_dynamic_libs('pyogg') + collect_dynamic_libs('sqlcipher3') + [(str(path),'ffmpeg') for path in (root/'tools'/'ffmpeg').glob('*') if path.suffix.lower() in {'.exe','.dll'}],
     datas=[(str(root / 'THIRD-PARTY-NOTICES.md'), '.'),
            (str(root / 'build' / 'generated' / 'licenses'), 'licenses'),
-           (str(root / 'build' / 'generated' / 'ZotiBox-Source-0.15.2.zip'), '.'),
+           (str(root / 'build' / 'generated' / 'ZotiBox-Source-0.15.3.zip'), '.'),
            (str(root/'tools'/'ffmpeg'/'LICENSE.txt'),'licenses/FFmpeg'),
            (str(root/'desktop'/'dj_library'/'resources'),'dj_library/resources')]
-          + copy_metadata('zotify') + copy_metadata('librespot') + copy_metadata('pyrekordbox') + collect_data_files('pyogg'),
+          + copy_metadata('zotify') + copy_metadata('librespot') + copy_metadata('pyrekordbox') + collect_data_files('pyogg') + ssl_data,
     hiddenimports=collect_submodules('zotify') + collect_submodules('librespot') + ['sqlalchemy.dialects.sqlite.pysqlcipher','sqlalchemy.dialects.sqlite.pysqlite'],
     hookspath=[],
     excludes=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets', 'pytest'],

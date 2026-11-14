@@ -18,12 +18,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Distribution preparation failed' }
     & $pythonPath -m PyInstaller --noconfirm --workpath .build-work --distpath .build-work\distribution build\app.spec
     if ($LASTEXITCODE -ne 0) { throw 'Executable build failed' }
+    & '.\.build-work\distribution\ZotiBox\ZotiBox Worker.exe' --check-https
+    if ($LASTEXITCODE -ne 0) { throw 'The packaged runtime cannot initialise verified HTTPS' }
     New-Item -ItemType Directory -Path dist\ZotiBox -Force | Out-Null
     Copy-Item -Path '.build-work\distribution\ZotiBox\*' -Destination 'dist\ZotiBox' -Recurse -Force
     if (-not (Test-Path -LiteralPath $compilerPath)) { throw 'Executable built; install Inno Setup and provide ISCC.exe to build the installer.' }
     & $compilerPath build\installer.iss
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    Get-FileHash -Algorithm SHA256 'dist\ZotiBox\ZotiBox.exe','dist\ZotiBox-Setup-0.15.2.exe'
+    Get-FileHash -Algorithm SHA256 'dist\ZotiBox\ZotiBox.exe','dist\ZotiBox-Setup-0.15.3.exe'
 } finally {
     $env:PATH = $taskOriginalPath
     Pop-Location

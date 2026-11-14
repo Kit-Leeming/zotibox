@@ -5,7 +5,10 @@ import traceback
 from pathlib import Path
 
 try:
-    if "--zotify-worker" in sys.argv:
+    if sys.argv[1:2] == ["--check-https"]:
+        from dj_library.https_check import main
+        result = main(sys.argv[2:])
+    elif "--zotify-worker" in sys.argv:
         from dj_library.zotify_worker import main
         result = main(sys.argv[sys.argv.index("--zotify-worker") + 1:])
     else:
